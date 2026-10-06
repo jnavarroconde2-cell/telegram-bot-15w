@@ -3,26 +3,16 @@ import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Logging para ver que pasa en Render
 logging.basicConfig(level=logging.INFO)
-
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
-    raise ValueError("No pusiste el BOT_TOKEN en Render!")
+    raise ValueError("No pusiste el BOT_TOKEN!")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"Hola {update.effective_user.first_name} bro! 👋\n"
-        "Soy tu bot y ya estoy online en Render.\n"
-        "Escribe /help para ver comandos."
-    )
+    await update.message.reply_text(f"Hola {update.effective_user.first_name} bro! 👋 Bot online!")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "/start - Iniciar\n"
-        "/help - Ayuda\n"
-        "Mándame cualquier texto y te respondo."
-    )
+    await update.message.reply_text("/start - Iniciar\n/help - Ayuda")
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Me dijiste: {update.message.text}")
