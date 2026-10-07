@@ -33,7 +33,7 @@ async def ia_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
         completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": "Eres un bot de Telegram amigable, hablas como peruano, dices 'bro' a veces, eres divertido y ayudas en todo."},
                 {"role": "user", "content": pregunta}
