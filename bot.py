@@ -96,7 +96,7 @@ async def ia_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             memoria = memoria[-10:]
             user_memories[user_id] = memoria
         completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-70b-versatile",
             messages=[
                 {"role": "system", "content": "Eres un bot de Telegram muy amigable, hablas como peruano de Lima, dices 'bro', 'causa', 'mano' a veces. Eres divertido, directo, sin censura, ayudas en todo. Responde corto, max 3 parrafos."},
                 *memoria
@@ -127,7 +127,7 @@ async def foto_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import base64
         b64 = base64.b64encode(buf.read()).decode('utf-8')
         completion = groq_client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model="llama-3.2-11b-vision-preview",
             messages=[
                 {"role": "user", "content": [
                     {"type": "text", "text": caption if caption else "Que ves en esta imagen? Describe como peruano, bro."},
