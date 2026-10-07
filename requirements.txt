@@ -3,3 +3,4 @@ groq
 flask
 requests
 PyPDF2
+gTTS
