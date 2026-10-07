@@ -70,7 +70,7 @@ def corregir_y_entender(texto):
         return texto
     try:
         comp=groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b"
+            model="openai/gpt-oss-20b",
             messages=[
                 {"role":"system","content":"You are typo corrector. Fix spelling, keep language and emojis. Halo->Hola, vosa->cosa, Haor->Ahora. Only corrected text, never empty."},
                 {"role":"user","content":texto}
