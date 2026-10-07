@@ -1,7 +1,6 @@
 import os
 import threading
 import logging
-import requests
 import asyncio
 from io import BytesIO
 from flask import Flask
