@@ -70,7 +70,7 @@ def corregir_y_entender(texto):
         return texto
     try:
         comp=groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-20b"
             messages=[
                 {"role":"system","content":"You are typo corrector. Fix spelling, keep language and emojis. Halo->Hola, vosa->cosa, Haor->Ahora. Only corrected text, never empty."},
                 {"role":"user","content":texto}
@@ -114,7 +114,7 @@ async def crear_imagen(update, prompt_original):
         await update.message.reply_text(f"Ya bro, creando: '{prompt_limpio}'... 🎨")
         try:
             comp=groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model="openai/gpt-oss-20b"
                 messages=[{"role":"system","content":"Convert to detailed ENGLISH photorealistic prompt, no text. Only english."},{"role":"user","content":prompt_limpio}],
                 max_tokens=150, temperature=0.7
             )
@@ -174,7 +174,7 @@ async def ia_reply(update:Update, context:ContextTypes.DEFAULT_TYPE):
             )
             temp=0.8
         completion=groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-20b"
             messages=[{"role":"system","content":system_prompt}, *memoria],
             temperature=temp, max_tokens=1500
         )
@@ -212,7 +212,7 @@ async def documento_handler(update,context):
             try: texto+=p.extract_text()+"\n"
             except: pass
         texto=texto[:4000]
-        comp=groq_client.chat.completions.create(model="llama-3.1-8b-instant",messages=[{"role":"system","content":"Resume PDF breve"},{"role":"user","content":texto}],max_tokens=1000)
+        comp=groq_client.chat.completions.create(model="openai/gpt-oss-20b",messages=[{"role":"system","content":"Resume PDF breve"},{"role":"user","content":texto}],max_tokens=1000)
         await enviar_largo(update,f"📄 Resumen:\n{comp.choices[0].message.content}")
     except Exception as e: await update.message.reply_text(f"Error PDF: {e}")
 
@@ -231,7 +231,7 @@ async def foto_handler(update,context):
         await enviar_largo(update,comp.choices[0].message.content)
     except Exception as e:
         try:
-            comp=groq_client.chat.completions.create(model="llama-3.1-8b-instant",messages=[{"role":"user","content":"No pude ver foto, di que intente de nuevo"}],max_tokens=100)
+            comp=groq_client.chat.completions.create(model="openai/gpt-oss-20b",messages=[{"role":"user","content":"No pude ver foto, di que intente de nuevo"}],max_tokens=100)
             await update.message.reply_text(comp.choices[0].message.content)
         except: await update.message.reply_text(f"Error foto: {e}")
 
