@@ -90,7 +90,7 @@ async def crear_imagen(update: Update, prompt_original: str):
         encoded = urllib.parse.quote(prompt_en)
         seed = int(asyncio.get_event_loop().time())
         # FLUX es más inteligente que turbo y ya no usamos enhance=true que te ponia texto
-        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&model=flux&nologo=true&seed={seed}"
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&model=turbo&enhance=false&nologo=true&seed={seed}"
         await update.message.reply_photo(photo=url, caption=f"Listo bro 🔥 {prompt_limpio}")
     except Exception as e:
         logging.error(f"Error: {e}")
