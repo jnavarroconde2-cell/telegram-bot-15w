@@ -114,7 +114,7 @@ async def crear_imagen(update, prompt_original):
         await update.message.reply_text(f"Ya bro, creando: '{prompt_limpio}'... 🎨")
         try:
             comp=groq_client.chat.completions.create(
-                model="openai/gpt-oss-20b"
+                model="openai/gpt-oss-20b",
                 messages=[{"role":"system","content":"Convert to detailed ENGLISH photorealistic prompt, no text. Only english."},{"role":"user","content":prompt_limpio}],
                 max_tokens=150, temperature=0.7
             )
@@ -174,7 +174,7 @@ async def ia_reply(update:Update, context:ContextTypes.DEFAULT_TYPE):
             )
             temp=0.8
         completion=groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b"
+            model="openai/gpt-oss-20b",
             messages=[{"role":"system","content":system_prompt}, *memoria],
             temperature=temp, max_tokens=1500
         )
