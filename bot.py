@@ -10,11 +10,10 @@ from groq import Groq
 import urllib.parse
 import base64
 
-# --- SERVIDOR PARA RENDER ---
 flask_app = Flask(__name__)
 @flask_app.route('/')
 def home():
-    return "Bot IA MAX POWER ON - Programmer Pro"
+    return "Bot IA V4 PRO - Programador + Imagenes PRO"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -22,32 +21,26 @@ def run_flask():
 
 threading.Thread(target=run_flask, daemon=True).start()
 
-# --- CONFIG ---
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.environ["BOT_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# --- MEMORIA ---
 user_memories = {}
 def get_memory(user_id):
     if user_id not in user_memories:
         user_memories[user_id] = []
     return user_memories[user_id]
 
-# --- FUNCION PARA MENSAJES LARGOS (PARCHE) ---
 async def enviar_largo(update, texto):
     if len(texto) <= 4000:
-        await update.message.reply_text(texto, parse_mode='Markdown')
+        await update.message.reply_text(texto)
         return
-    # Si es muy largo lo partimos en bloques
     for i in range(0, len(texto), 4000):
-        parte = texto[i:i+4000]
-        await update.message.reply_text(parte, parse_mode='Markdown')
+        await update.message.reply_text(texto[i:i+4000])
         await asyncio.sleep(0.3)
 
-# --- DETECTOR DE IMAGENES ---
-IMG_KEYWORDS = ["crea una imagen", "creame una imagen", "hazme una imagen", "genera una imagen", "imagen de", "dibuja", "crea una foto", "goku", "naruto"]
+IMG_KEYWORDS = ["crea una imagen", "creame una imagen", "hazme una imagen", "genera una imagen", "imagen de", "dibuja", "crea una foto"]
 def es_pedido_imagen(texto):
     t = texto.lower()
     return any(k in t for k in IMG_KEYWORDS)
@@ -57,39 +50,57 @@ def extraer_prompt_imagen(texto):
     for k in IMG_KEYWORDS:
         if k in t and len(k) > 5:
             idx = t.find(k) + len(k)
-            prompt = texto[idx:].strip()
-            if len(prompt) > 3:
-                return prompt
+            p = texto[idx:].strip()
+            if len(p) > 2:
+                return p
     return texto
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Hola {update.effective_user.first_name} bro! 🔥\nSoy tu bot IA normal + Programador Pro.\n1. Hablar normal\n2. Crear imágenes: 'creame una imagen de goku programador'\n3. Analizar fotos\n4. Programar: pídeme código PRO\n/clear -> borra memoria")
+    await update.message.reply_text(f"Hola {update.effective_user.first_name} bro! 🔥\nBot V4 PRO:\n1. Hablo normal y recuerdo\n2. Creo imágenes PRO con lógica\n3. Analizo fotos\n4. Te doy código PRO senior\nUsa: creame una imagen de...\n/clear limpia memoria")
 
 async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_memories[update.effective_user.id] = []
-    await update.message.reply_text("Listo bro, memoria limpia 🧹")
+    await update.message.reply_text("Memoria limpia bro 🧹")
 
+# --- IMAGENES PRO CON MEJORADOR GRATIS ---
 async def crear_imagen(update: Update, prompt: str):
     try:
-        await update.message.reply_text(f"Ya bro, creando: '{prompt}'... espera 5 seg")
-        # Turbo es 3 veces más rápido que flux, evita el Timed out
-        encoded_prompt = urllib.parse.quote(prompt + " high quality, 4k, detailed")
-        seed = int(asyncio.get_event_loop().time())
-        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&model=turbo&nologo=true&seed={seed}"
-        await update.message.reply_photo(photo=url, caption=f"Listo bro 👉 {prompt}")
-    except Exception as e:
-        logging.error(f"Error imagen 1: {e}")
+        await update.message.reply_text(f"Ya bro, mejorando tu idea: '{prompt}'...")
+
+        # 1. Mejoramos el prompt con Groq gratis (100 tokens nada mas)
         try:
-            await asyncio.sleep(1)
-            encoded_prompt = urllib.parse.quote(prompt)
-            url2 = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&model=flux&nologo=true"
-            await update.message.reply_photo(photo=url2, caption=f"Listo bro (2do intento) 👉 {prompt}")
+            comp = groq_client.chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=[
+                    {"role": "system", "content": "Eres experto en prompts para FLUX. Convierte la idea del usuario a un prompt en INGLES, ultra detallado, cinematografico, 8k, ultra realistic, highly detailed, sharp focus. Ejemplo: 'goku programador' -> 'Goku from Dragon Ball Z as a professional programmer sitting at modern RGB gaming setup with 3 monitors showing code, wearing black hoodie, drinking coffee, neon lights, ultra detailed, 8k, cinematic lighting'. Solo devuelve el prompt en ingles, nada mas."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=150,
+                temperature=0.8
+            )
+            prompt_en = comp.choices[0].message.content.strip()
+        except:
+            prompt_en = prompt
+
+        print(f"Original: {prompt} | Mejorado: {prompt_en}")
+        encoded = urllib.parse.quote(prompt_en)
+        seed = int(asyncio.get_event_loop().time())
+        # flux + enhance=true = mucha mejor logica que turbo
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&model=flux&enhance=true&nologo=true&seed={seed}&referrer=bot"
+        await update.message.reply_photo(photo=url, caption=f"Listo bro 🔥\n{prompt}")
+    except Exception as e:
+        logging.error(f"Error imagen: {e}")
+        try:
+            # Reintento rapido si flux falla
+            encoded = urllib.parse.quote(prompt)
+            url2 = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&model=turbo&nologo=true"
+            await update.message.reply_photo(photo=url2, caption=f"Listo bro (reintento) 👉 {prompt}")
         except Exception as e2:
-            await update.message.reply_text(f"Bro falló la imagen: {e2}. Reintenta en 10 seg mano")
+            await update.message.reply_text(f"Bro falló imagen: {e2}")
 
 async def imagen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usa: /imagen goku programando")
+        await update.message.reply_text("Usa: /imagen goku programando en su pc")
         return
     prompt = " ".join(context.args)
     await crear_imagen(update, prompt)
@@ -100,10 +111,8 @@ async def ia_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         texto = update.message.text or ""
         if es_pedido_imagen(texto):
-            prompt = extraer_prompt_imagen(texto)
-            await crear_imagen(update, prompt)
+            await crear_imagen(update, extraer_prompt_imagen(texto))
             return
-
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
         memoria = get_memory(user_id)
         memoria.append({"role": "user", "content": texto})
@@ -114,7 +123,7 @@ async def ia_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         completion = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=[
-                {"role": "system", "content": "Eres una IA normal, mi pata de Lima, Perú. Hablas normal, dices 'bro', 'mano' de forma natural. Eres útil, directo. HABILIDADES: 1) Conversas normal 2) Creas imágenes si te piden 3) Tienes memoria. MODO PROGRAMADOR PRO: Cuando te pidan código, eres Programador Senior 10 años experiencia. Das código limpio, optimizado, comentado y listo para producción. Si es código largo, dividelo por partes con titulos claros. Explicas en 2 líneas antes del código. Web=responsive moderno. Python=con manejo de errores. Siempre código completo."},
+                {"role": "system", "content": "Eres una IA normal, mi pata de Lima Perú, hablas como causa, dices 'bro' natural. Eres útil y directo. HABILIDADES: 1) Conversas normal 2) Creas imágenes PRO 3) Tienes memoria. MODO PROGRAMADOR PRO: Cuando pidan código, eres Senior 10 años, das código limpio, optimizado, comentado, producción. Si es largo dividelo con titulos. Web=responsive moderno. Python=con try/except. Explica en 2 líneas antes."},
                 *memoria
             ],
             temperature=0.8,
@@ -123,13 +132,10 @@ async def ia_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         respuesta = completion.choices[0].message.content
         memoria.append({"role": "assistant", "content": respuesta})
         user_memories[user_id] = memoria
-
-        # AQUI ESTA EL PARCHE PARA QUE NO DE MESSAGE TOO LONG
         await enviar_largo(update, respuesta)
-
     except Exception as e:
         logging.error(f"Error: {e}")
-        await update.message.reply_text(f"Oy bro error: {e}")
+        await update.message.reply_text(f"Error bro: {e}")
 
 async def foto_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -145,19 +151,12 @@ async def foto_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         b64 = base64.b64encode(buf.read()).decode('utf-8')
         completion = groq_client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[
-                {"role": "user", "content": [
-                    {"type": "text", "text": caption if caption else "Que ves en esta imagen? Describe como peruano, bro."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                ]}
-            ],
+            messages=[{"role": "user", "content": [{"type": "text", "text": caption if caption else "Que ves? Describe como peruano bro."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}],
             max_tokens=600
         )
-        respuesta = completion.choices[0].message.content
-        await enviar_largo(update, respuesta)
+        await enviar_largo(update, completion.choices[0].message.content)
     except Exception as e:
-        logging.error(f"Error foto: {e}")
-        await update.message.reply_text(f"Bro no pude ver la foto: {e}")
+        await update.message.reply_text(f"Error foto bro: {e}")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TOKEN).build()
@@ -166,5 +165,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("imagen", imagen_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, foto_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ia_reply))
-    print("Bot MAX POWER Programmer iniciado 🔥")
+    print("Bot V4 PRO iniciado 🔥")
     app.run_polling()
