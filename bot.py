@@ -13,7 +13,7 @@ import base64
 flask_app = Flask(__name__)
 @flask_app.route('/')
 def home():
-    return "Bot V5 PRO FIX - Imagenes con logica"
+    return "Bot V6 FIX Gato Gamer"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -40,100 +40,90 @@ async def enviar_largo(update, texto):
         await update.message.reply_text(texto[i:i+4000])
         await asyncio.sleep(0.3)
 
-# EXTRACTOR NUEVO - YA NO CORTA MAL
 def extraer_prompt_imagen(texto):
     t = texto.lower()
-    frases = ["creame una imagen de", "crea una imagen de", "hazme una imagen de", "genera una imagen de", "creame una imagen", "crea una imagen", "hazme una imagen", "genera una imagen", "imagen de", "imagen", "crea una foto de", "dibuja"]
+    frases = ["creame una imagen de", "crea una imagen de", "hazme una imagen de", "genera una imagen de", "creame una imagen", "crea una imagen", "imagen de", "imagen", "dibuja", "crea una foto de"]
     prompt = texto
     for f in frases:
         if f in t:
             idx = t.find(f) + len(f)
             prompt = texto[idx:].strip()
             break
-    # Limpieza del "de" "un" del inicio
     low = prompt.lower()
-    if low.startswith("de "):
-        prompt = prompt[3:].strip()
-    if low.startswith("un "):
-        prompt = prompt[3:].strip()
-    if low.startswith("una "):
-        prompt = prompt[4:].strip()
+    if low.startswith("de "): prompt = prompt[3:].strip()
+    if low.startswith("un "): prompt = prompt[3:].strip()
+    if low.startswith("una "): prompt = prompt[4:].strip()
     return prompt if len(prompt) > 1 else texto
 
 def es_pedido_imagen(texto):
-    t = texto.lower()
-    return any(k in t for k in ["crea una imagen", "creame una imagen", "hazme una imagen", "genera una imagen", "imagen de", "dibuja", "crea una foto"])
+    return any(k in texto.lower() for k in ["crea una imagen", "creame una imagen", "hazme una imagen", "genera una imagen", "imagen de", "dibuja"])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Hola {update.effective_user.first_name} bro! V5 FIX 🔥\nYa no genera bolas con texto.\nPrueba: creame una imagen de goku programador en su pc gamer")
+    await update.message.reply_text(f"Hola {update.effective_user.first_name} bro! V6 FIX 🔥\nGato gamer ya arreglado.")
 
 async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_memories[update.effective_user.id] = []
     await update.message.reply_text("Memoria limpia 🧹")
 
+# --- V6 - FIX PARA TU CAPTURA DEL GATO GAMER ---
 async def crear_imagen(update: Update, prompt_original: str):
     try:
         prompt_limpio = extraer_prompt_imagen(prompt_original)
-        if not prompt_limpio:
-            prompt_limpio = prompt_original
-
         await update.message.reply_text(f"Ya bro, creando PRO: '{prompt_limpio}'...")
 
-        # MEJORADOR DE PROMPT GRATIS - Pasa de español simple a inglés detallado
+        # Mejorador que obliga a que sea en interior gamer
         try:
             comp = groq_client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 messages=[
-                    {"role": "system", "content": "You are a prompt engineer for image generation. Convert the user's idea (in spanish) to a detailed ENGLISH prompt for turbo model. Make it ultra detailed, 8k, cinematic lighting, highly detailed, sharp focus. Add at the end: 'no text, no words, no letters, no watermark'. Only return the english prompt. Example: 'goku con computadora' -> 'Goku from Dragon Ball Z as a programmer sitting at a modern RGB gaming desk with 3 monitors showing code, wearing black hoodie, drinking coffee, neon lights, ultra detailed, 8k, cinematic lighting, no text, no words'"},
+                    {"role": "system", "content": "You are a FLUX prompt engineer. Convert spanish idea to detailed ENGLISH prompt. RULES: If user says 'gato gamer', you MUST describe: 'a cute cat wearing RGB gaming headset, sitting at a modern gaming desk with mechanical keyboard, mouse, monitors, LED lights, indoor cozy gaming room, photorealistic'. Always add: 'indoor, gaming room, not outdoor, not street, no text, no words, ultra detailed, 8k'. Only return english prompt."},
                     {"role": "user", "content": prompt_limpio}
                 ],
-                max_tokens=150,
+                max_tokens=180,
                 temperature=0.7
             )
-            prompt_en = comp.choices[0].message.content.strip().replace('"','').replace("'", "")
+            prompt_en = comp.choices[0].message.content.strip()
         except:
-            prompt_en = f"{prompt_limpio}, ultra detailed, 8k, cinematic, no text, no words, no watermark"
+            prompt_en = f"{prompt_limpio} wearing gaming headset sitting at RGB gaming desk in cozy indoor gaming room, photorealistic, 8k, no outdoor, no street, no text"
 
-        print(f"Original: {prompt_original} | Limpio: {prompt_limpio} | EN: {prompt_en}")
-
+        print(f"EN: {prompt_en}")
         encoded = urllib.parse.quote(prompt_en)
         seed = int(asyncio.get_event_loop().time())
-        # TURBO es el más estable, con prompt mejorado sale con lógica
-        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&model=turbo&nologo=true&seed={seed}"
+        # FLUX es más inteligente que turbo y ya no usamos enhance=true que te ponia texto
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&model=flux&nologo=true&seed={seed}"
         await update.message.reply_photo(photo=url, caption=f"Listo bro 🔥 {prompt_limpio}")
     except Exception as e:
-        logging.error(f"Error imagen: {e}")
-        await update.message.reply_text(f"Error bro: {e}")
+        logging.error(f"Error: {e}")
+        try:
+            # Fallback a turbo si flux esta caido
+            encoded = urllib.parse.quote(prompt_en)
+            url2 = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&model=turbo&nologo=true&seed={seed}"
+            await update.message.reply_photo(photo=url2, caption=f"Listo bro (turbo) 🔥 {prompt_limpio}")
+        except Exception as e2:
+            await update.message.reply_text(f"Error bro: {e2}")
 
 async def imagen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usa: /imagen goku programando")
+        await update.message.reply_text("Usa: /imagen gato gamer")
         return
     await crear_imagen(update, " ".join(context.args))
 
 async def ia_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
     try:
         texto = update.message.text or ""
         if es_pedido_imagen(texto):
             await crear_imagen(update, texto)
             return
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         memoria = get_memory(user_id)
         memoria.append({"role": "user", "content": texto})
-        if len(memoria) > 12:
-            memoria = memoria[-12:]
+        if len(memoria) > 12: memoria = memoria[-12:]
         user_memories[user_id] = memoria
-
         completion = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
-            messages=[
-                {"role": "system", "content": "Eres una IA normal, mi pata de Lima Perú, hablas como causa, dices 'bro' natural. MODO PROGRAMADOR PRO: Cuando pidan código, eres Senior 10 años, das código limpio, optimizado, comentado, producción."},
-                *memoria
-            ],
-            temperature=0.8,
-            max_tokens=2000
+            messages=[{"role": "system", "content": "Eres mi pata de Lima, dices bro natural. Programador senior si piden código."}, *memoria],
+            temperature=0.8, max_tokens=2000
         )
         respuesta = completion.choices[0].message.content
         memoria.append({"role": "assistant", "content": respuesta})
@@ -155,7 +145,7 @@ async def foto_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         b64 = base64.b64encode(buf.read()).decode('utf-8')
         comp = groq_client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[{"role": "user", "content": [{"type": "text", "text": caption if caption else "Que ves? Describe como peruano bro."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}],
+            messages=[{"role": "user", "content": [{"type": "text", "text": caption or "Que ves? Describe como peruano bro."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}],
             max_tokens=600
         )
         await enviar_largo(update, comp.choices[0].message.content)
@@ -169,5 +159,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("imagen", imagen_cmd))
     app.add_handler(MessageHandler(filters.PHOTO, foto_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ia_reply))
-    print("Bot V5 FIX iniciado 🔥")
+    print("Bot V6 FIX iniciado 🔥")
     app.run_polling()
