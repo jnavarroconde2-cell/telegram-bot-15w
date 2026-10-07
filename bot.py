@@ -12,10 +12,12 @@ import urllib.parse
 flask_app = Flask(__name__)
 @flask_app.route('/')
 def home():
-    return "Bot IA MAX POWER ON 🔥"
+    return "Bot IA MAX POWER ON"
+
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host='0.0.0.0', port=port)
+    flask_app.run(host="0.0.0.0", port=port)
+
 threading.Thread(target=run_flask, daemon=True).start()
 
 logging.basicConfig(level=logging.INFO)
@@ -29,53 +31,43 @@ def get_memory(user_id):
         user_memories[user_id] = []
     return user_memories[user_id]
 
-IMG_KEYWORDS = ["crea una imagen", "creame una imagen", "hazme una imagen", "genera una imagen", "imagen de", "dibuja", "crea una foto", "foto de"]
+IMG_KEYWORDS = ["crea una imagen", "creame una imagen", "hazme una imagen", "genera una imagen", "imagen de", "dibuja", "crea una foto"]
 def es_pedido_imagen(texto):
     t = texto.lower()
     return any(k in t for k in IMG_KEYWORDS)
+
 def extraer_prompt_imagen(texto):
     t = texto.lower()
     for k in IMG_KEYWORDS:
         if k in t:
             idx = t.find(k) + len(k)
             prompt = texto[idx:].strip()
-            if len(prompt) < 3:
-                prompt = texto
-            return prompt
+            if len(prompt) > 3:
+                return prompt
     return texto
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"Hola {update.effective_user.first_name} bro! 🔥\n"
-        f"Soy tu bot IA al MAXIMO PODER 100% gratis.\n\n"
-        f"Que puedo hacer:\n"
-        f"1. Hablar contigo y recordar lo que me dices\n"
-        f"2. Crear imagenes: dime 'creame una imagen de goku con vegeta'\n"
-        f"3. Analizar fotos: mandame una foto\n"
-        f"4. /imagen + tu idea -> crea imagen directo\n"
-        f"5. /clear -> borra memoria\n\n"
-        f"Dime lo que quieras bro!"
-    )
+    await update.message.reply_text(f"Hola {update.effective_user.first_name} bro! 🔥\nSoy tu bot IA al MAXIMO PODER 100% gratis.\n1. Hablar contigo y recordar lo que me dices\n2. Crear imágenes: dime 'creame una imagen de goku con vegeta'\n3. Analizar fotos: mándame una foto\n4. Programar: pídeme código y te doy código PRO\n5. /clear -> borra memoria\nDime lo que quieras bro!")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
 async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_memories[update.effective_user.id] = []
-    await update.message.reply_text("Listo bro, olvide todo. Memoria limpia 🧠✨")
+    await update.message.reply_text("Listo bro, olvide todo. Memoria limpia 🧹")
 
 async def crear_imagen(update: Update, prompt: str):
     try:
-        await update.message.reply_text(f"Ya bro, creando: '{prompt}'... 🎨 espera 5 seg")
+        await update.message.reply_text(f"Ya bro, creando: '{prompt}'... espera 5 seg")
         encoded_prompt = urllib.parse.quote(prompt)
-        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&model=flux&enhance=true&nologo=true&seed={os.urandom(4).hex()}"
-        await update.message.reply_photo(photo=url, caption=f"Listo bro 🔥: {prompt}")
+        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&model=flux&enhance=true&nologo=true"
+        await update.message.reply_photo(photo=url, caption=f"Listo bro 👉 {prompt}")
     except Exception as e:
-        await update.message.reply_text(f"Bro fallo la imagen: {e}")
+        await update.message.reply_text(f"Bro falló la imagen: {e}")
 
 async def imagen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usalo asi bro: /imagen goku con vegeta tomando inca kola")
+        await update.message.reply_text("Úsalo así bro: /imagen goku con vegeta tomando inca kola")
         return
     prompt = " ".join(context.args)
     await crear_imagen(update, prompt)
@@ -94,15 +86,16 @@ async def ia_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         memoria.append({"role": "user", "content": texto})
         if len(memoria) > 10:
             memoria = memoria[-10:]
-            user_memories[user_id] = memoria
+        user_memories[user_id] = memoria
+
         completion = groq_client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=[
-                {"role": "system", "content": "Eres un bot de Telegram muy amigable, hablas como peruano de Lima, dices 'bro', 'causa', 'mano' a veces. Eres divertido, directo, sin censura, ayudas en todo. Responde corto, max 3 parrafos."},
+                {"role": "system", "content": "Eres una IA normal, mi pata, hablas como causa de Lima, Perú. Dices 'bro', 'mano', 'oe' de forma natural, no exagerado. Eres útil, directo, sin rodeos. TUS HABILIDADES: 1) Conversas normal de cualquier tema 2) Creas imágenes si te las piden 3) Tienes memoria. MODO PROGRAMADOR: Cuando te pidan código (python, html, js, etc), te conviertes en Programador Senior de 10 años. Das código limpio, optimizado, comentado, listo para producción. Explicas en 2 líneas qué hace antes del código. Web = moderno y responsive. Python = con manejo de errores. Siempre código completo."},
                 *memoria
             ],
             temperature=0.8,
-            max_tokens=800
+            max_tokens=1500
         )
         respuesta = completion.choices[0].message.content
         memoria.append({"role": "assistant", "content": respuesta})
@@ -127,7 +120,7 @@ async def foto_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         import base64
         b64 = base64.b64encode(buf.read()).decode('utf-8')
         completion = groq_client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[
                 {"role": "user", "content": [
                     {"type": "text", "text": caption if caption else "Que ves en esta imagen? Describe como peruano, bro."},
