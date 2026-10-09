@@ -6,3 +6,6 @@ PyPDF2
 gTTS
 ddgs
 tzdata
+pypdf
+python-docx
+openpyxl
