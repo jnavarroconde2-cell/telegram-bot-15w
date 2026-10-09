@@ -6,8 +6,15 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from groq import Groq
 
-try: import PyPDF2; PDF_AVAILABLE=True
-except: PDF_AVAILABLE=False
+try: from pypdf import PdfReader
+except Exception:
+    try: from PyPDF2 import PdfReader
+    except Exception: PdfReader=None
+PDF_AVAILABLE = PdfReader is not None
+try: import docx
+except Exception: docx=None
+try: import openpyxl
+except Exception: openpyxl=None
 try: from gtts import gTTS; TTS_AVAILABLE=True
 except: TTS_AVAILABLE=False
 try: from ddgs import DDGS
@@ -17,7 +24,7 @@ except Exception:
 
 flask_app = Flask(__name__)
 @flask_app.route('/')
-def home(): return "Bot V15 Imagenes y Vision - Online"
+def home(): return "Bot V16 Fix Imagenes Internet Archivos - Online"
 def run_flask():
     port=int(os.environ.get("PORT",10000))
     flask_app.run(host="0.0.0.0",port=port)
@@ -27,13 +34,18 @@ logging.basicConfig(level=logging.INFO)
 TOKEN=os.environ["BOT_TOKEN"]
 GROQ_API_KEY=os.environ["GROQ_API_KEY"]
 groq_client=Groq(api_key=GROQ_API_KEY)
+POLLI_KEY=os.environ.get("POLLINATIONS_KEY","").strip()   # opcional (gratis en enter.pollinations.ai)
+HORDE_KEY=os.environ.get("HORDE_KEY","0000000000").strip() # AI Horde anónimo por defecto
 
 # ---------- CONFIG ----------
 MODELOS=["openai/gpt-oss-20b","llama-3.1-8b-instant"]
 VISION_MODELOS=["meta-llama/llama-4-scout-17b-16e-instruct","meta-llama/llama-4-maverick-17b-128e-instruct"]
 USAR_CORRECTOR_IA=False
+USAR_COMPOUND=True        # búsqueda web integrada de Groq (gratis, ~250/día)
 COOLDOWN=1.5
-VENTANA_FOTO=900   # segundos que recuerda tu última foto para preguntas de seguimiento
+VENTANA_FOTO=900
+VENTANA_DOC=1800
+TEXTO_MAX=10000
 
 def ahora():
     try:
@@ -56,7 +68,7 @@ def llm(messages, max_tokens=800, temperature=0.7, modelos=None):
     raise ultimo or RuntimeError("Respuesta vacía")
 async def allm(*a,**k): return await asyncio.to_thread(llm,*a,**k)
 
-# ---------- VISIÓN (analizar fotos) ----------
+# ---------- VISIÓN ----------
 def vision(b64, instruccion, mime="image/jpeg"):
     ultimo=None
     for m in VISION_MODELOS:
@@ -132,7 +144,7 @@ def msg_error(e):
     s=str(e)
     if "429" in s or "rate" in s.lower():
         return "Estoy al límite gratis por ahora bro 😅 espera unos segundos y reintenta."
-    return f"Error bro: {s[:200]}"
+    return f"Error bro: {s[:250]}"
 
 # ---------- AUTOCORRECTOR ----------
 def corregir_y_entender(texto):
@@ -149,7 +161,7 @@ def corregir_y_entender(texto):
         return res if res and len(res)>2 else texto
     except: return texto
 
-# ---------- IMÁGENES ----------
+# ---------- GENERACIÓN DE IMÁGENES (con plan B) ----------
 FRASES_IMG=["creame una imagen de","crea una imagen de","hazme una imagen de","haz una imagen de","genera una imagen de",
             "crea una foto de","genera una foto de","creame una imagen","crea una imagen","imagen de",
             "dibuja una","dibuja un","dibuja","crea foto de","create an image of"]
@@ -177,7 +189,57 @@ def quiere_recrear(texto):
     t=(texto or "").lower()
     return any(k in t for k in ["recrea","recréala","recreala","parecida","similar a","conviértela","convierte esta","transforma","en estilo","estilo anime","versión anime","version anime","caricatura de esta"])
 
-ultimo_img={}   # uid -> (prompt_en, caption, w, h)
+def _es_imagen(r):
+    return r.status_code==200 and r.headers.get("content-type","").lower().startswith("image")
+
+def _pollinations(prompt_en,w,h):
+    enc=urllib.parse.quote(prompt_en[:900])
+    seed=random.randint(1,999999)
+    errores=[]
+    if POLLI_KEY:   # con clave gratis: modelos buenos
+        for modelo in ["flux","zimage","turbo"]:
+            try:
+                url=f"https://gen.pollinations.ai/image/{enc}?model={modelo}&width={w}&height={h}&seed={seed}&nologo=true"
+                r=requests.get(url,headers={"Authorization":f"Bearer {POLLI_KEY}"},timeout=90)
+                if _es_imagen(r): return r.content
+                errores.append(f"{modelo}:{r.status_code}")
+            except Exception as e: errores.append(f"{modelo}:{str(e)[:60]}")
+    try:   # modo anónimo (puede estar limitado o dar 402)
+        url=f"https://image.pollinations.ai/prompt/{enc}?width={w}&height={h}&model=turbo&nologo=true&seed={seed}"
+        r=requests.get(url,timeout=60)
+        if _es_imagen(r): return r.content
+        errores.append(f"anonimo:{r.status_code}")
+    except Exception as e: errores.append(f"anonimo:{str(e)[:60]}")
+    raise RuntimeError(", ".join(errores))
+
+def _horde(prompt_en,w,h,max_espera=170):
+    H={"apikey":HORDE_KEY,"Client-Agent":"telegrambot:1.0:anon","Content-Type":"application/json"}
+    ww=max(512,min(768,(w//64)*64)) if w<=h else 896
+    hh=max(512,min(768,(h//64)*64)) if h<=w else 896
+    if w==h: ww=hh=768
+    body={"prompt":prompt_en[:800]+" ### blurry, low quality, deformed, text, watermark",
+          "params":{"width":ww,"height":hh,"steps":25,"n":1,"sampler_name":"k_euler_a","cfg_scale":7},
+          "nsfw":False,"censor_nsfw":True,"r2":True}
+    r=requests.post("https://aihorde.net/api/v2/generate/async",json=body,headers=H,timeout=30)
+    r.raise_for_status()
+    rid=r.json()["id"]
+    t0=time.time()
+    while True:
+        if time.time()-t0>max_espera:
+            try: requests.delete(f"https://aihorde.net/api/v2/generate/status/{rid}",headers=H,timeout=10)
+            except Exception: pass
+            raise RuntimeError("Horde tardó demasiado")
+        time.sleep(4)
+        c=requests.get(f"https://aihorde.net/api/v2/generate/check/{rid}",headers=H,timeout=20).json()
+        if c.get("faulted"): raise RuntimeError("Horde falló")
+        if c.get("done"): break
+    s=requests.get(f"https://aihorde.net/api/v2/generate/status/{rid}",headers=H,timeout=30).json()
+    img=s["generations"][0]["img"]
+    if img.startswith("http"):
+        return requests.get(img,timeout=60).content
+    return base64.b64decode(img)
+
+ultimo_img={}
 def teclado_img():
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("🔄 Otra versión",callback_data="img:otra"),
@@ -185,16 +247,17 @@ def teclado_img():
         InlineKeyboardButton("🖥️ Horizontal",callback_data="img:hor")]])
 
 async def enviar_imagen(msg, uid, prompt_en, caption, w=1024, h=1024):
-    encoded=urllib.parse.quote(prompt_en)
-    contenido=None; ultimo=None
-    for modelo in ["flux","turbo"]:   # flux = mejor calidad; turbo = respaldo rápido
-        try:
-            seed=random.randint(1,999999)
-            url=f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}&model={modelo}&nologo=true&seed={seed}"
-            r=await asyncio.to_thread(requests.get,url,timeout=60); r.raise_for_status()
-            contenido=r.content; break
-        except Exception as e: ultimo=e
-    if not contenido: raise ultimo or RuntimeError("sin imagen")
+    contenido=None; errores=[]
+    try: contenido=await asyncio.to_thread(_pollinations,prompt_en,w,h)
+    except Exception as e:
+        errores.append(f"Pollinations [{e}]"); logging.warning(f"Pollinations falló: {e}")
+    if not contenido:
+        await msg.reply_text("El servidor principal no me dejó 😕 probando el plan B gratis (puede tardar 1-2 min) ⏳")
+        try: contenido=await asyncio.to_thread(_horde,prompt_en,w,h)
+        except Exception as e:
+            errores.append(f"Horde [{e}]"); logging.warning(f"Horde falló: {e}")
+    if not contenido:
+        raise RuntimeError("No pude crear la imagen ahora. "+" | ".join(errores)[:300])
     ultimo_img[uid]=(prompt_en,caption,w,h)
     bio=BytesIO(contenido); bio.name="imagen.jpg"
     await msg.reply_photo(photo=bio, caption=f"Listo bro 🔥 {caption}"[:900], reply_markup=teclado_img())
@@ -230,7 +293,7 @@ async def img_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
     except Exception as e: await q.message.reply_text(f"Error imagen: {e}")
 
 # ---------- ANÁLISIS DE FOTOS ----------
-ultima_foto={}   # uid -> (file_id, timestamp)
+ultima_foto={}
 KW_PREGUNTA_FOTO=["la foto","esa foto","en la foto","la imagen","esa imagen","en la imagen","qué ves","que ves","lo que ves",
                   "qué tiene","que tiene","qué significa esto","que significa esto","qué significa eso","que significa eso",
                   "significado de esto","significado de la foto","significado de la imagen"]
@@ -247,7 +310,6 @@ async def procesar_foto(update, context, file_id, caption, mime="image/jpeg"):
     f=await context.bot.get_file(file_id)
     buf=BytesIO(); await f.download_to_memory(buf)
     b64=base64.b64encode(buf.getvalue()).decode("utf-8")
-    # recrear a partir de la foto
     if quiere_recrear(caption):
         desc=await asyncio.to_thread(vision,b64,
             "Describe this image in precise detail in English (subject, pose, colors, setting, lighting, style) as a prompt for an AI image generator. Do not identify real people. Output only the description.",mime)
@@ -266,33 +328,150 @@ async def procesar_foto(update, context, file_id, caption, mime="image/jpeg"):
     mem.append({"role":"assistant","content":respuesta[:1200]})
     user_memories[uid]=mem[-14:]; guardar_memorias()
 
-# ---------- BÚSQUEDA ----------
+# ---------- LECTURA DE ARCHIVOS ----------
+EXT_TEXTO=(".txt",".md",".csv",".tsv",".json",".py",".js",".ts",".html",".css",".log",".xml",".yml",".yaml",".ini",".sql",".java",".c",".cpp",".sh")
+EXT_CODIGO=(".py",".js",".ts",".java",".c",".cpp",".sh",".sql",".html",".css")
+ultimo_doc={}   # uid -> (nombre, texto, timestamp)
+KW_DOC=["el archivo","ese archivo","del archivo","en el archivo","el pdf","ese pdf","del pdf","en el pdf",
+        "el documento","ese documento","del documento","el excel","la hoja","el código","el codigo"]
+
+def extraer_texto_archivo(data, nombre):
+    n=nombre.lower()
+    if n.endswith(".pdf"):
+        if not PdfReader: raise RuntimeError("Falta instalar pypdf o PyPDF2")
+        reader=PdfReader(BytesIO(data)); partes=[]
+        for p in reader.pages[:20]:
+            try: partes.append(p.extract_text() or "")
+            except Exception: pass
+        return "\n".join(partes)
+    if n.endswith(".docx"):
+        if not docx: raise RuntimeError("Falta instalar python-docx")
+        d=docx.Document(BytesIO(data))
+        partes=[p.text for p in d.paragraphs]
+        for t in d.tables:
+            for fila in t.rows: partes.append(" | ".join(c.text for c in fila.cells))
+        return "\n".join(partes)
+    if n.endswith((".xlsx",".xlsm")):
+        if not openpyxl: raise RuntimeError("Falta instalar openpyxl")
+        wb=openpyxl.load_workbook(BytesIO(data),read_only=True,data_only=True)
+        partes=[]
+        for ws in wb.worksheets[:5]:
+            partes.append(f"## Hoja: {ws.title}")
+            for i,fila in enumerate(ws.iter_rows(values_only=True)):
+                if i>=200: break
+                partes.append(" | ".join("" if c is None else str(c) for c in fila))
+        return "\n".join(partes)
+    if n.endswith(EXT_TEXTO):
+        for enc in ("utf-8","latin-1"):
+            try: return data.decode(enc)
+            except Exception: continue
+    raise ValueError("tipo no soportado")
+
+def pregunta_defecto(nombre):
+    n=(nombre or "").lower()
+    if n.endswith(EXT_CODIGO): return "Explica qué hace este código, cómo está organizado y señala errores o mejoras importantes."
+    if n.endswith((".csv",".tsv",".xlsx",".xlsm")): return "Resume qué datos contiene (columnas, cantidad aproximada, hallazgos clave)."
+    return "Haz un resumen claro y breve con los puntos clave."
+
+def es_pregunta_doc(low, uid):
+    d=ultimo_doc.get(uid)
+    if not d or time.time()-d[2]>VENTANA_DOC: return False
+    if any(v in low for v in VERBOS_CREAR): return False
+    return any(k in low for k in KW_DOC)
+
+async def responder_sobre_doc(update, uid, pregunta):
+    nombre,texto,_=ultimo_doc[uid]
+    resp=await allm([
+        {"role":"system","content":"Eres un asistente experto. Responde usando el contenido del archivo. Si la respuesta no está en el archivo, dilo claramente. Responde en el mismo idioma del usuario."},
+        {"role":"user","content":f"ARCHIVO '{nombre}':\n{texto}\n\nPREGUNTA: {pregunta}"}],max_tokens=1200,temperature=0.3)
+    await enviar_largo(update,f"📄 {resp}")
+    mem=get_memory(uid)
+    mem.append({"role":"user","content":f"[Archivo {nombre}] {pregunta}"[:300]})
+    mem.append({"role":"assistant","content":resp[:1200]})
+    user_memories[uid]=mem[-14:]; guardar_memorias()
+
+async def procesar_archivo(update, context, doc, pregunta):
+    uid=update.effective_user.id
+    nombre=doc.file_name or "archivo"
+    if doc.file_size and doc.file_size>20*1024*1024:
+        await update.message.reply_text("Telegram solo me deja bajar archivos de hasta 20 MB 😕 mándame uno más liviano."); return
+    await update.message.reply_text(f"Leyendo {nombre} 📖...")
+    f=await doc.get_file(); buf=BytesIO(); await f.download_to_memory(buf)
+    try:
+        texto=await asyncio.to_thread(extraer_texto_archivo,buf.getvalue(),nombre)
+    except ValueError:
+        await update.message.reply_text("Ese tipo de archivo aún no lo leo 😕\nLeo: PDF, Word (.docx), Excel (.xlsx), TXT, CSV, JSON y código (.py .js .html ...).\nTambién imágenes y fotos."); return
+    texto=(texto or "").strip()
+    if not texto:
+        await update.message.reply_text("No pude sacar texto de ese archivo (¿es un PDF escaneado?). Mándamelo como foto o captura y lo leo con visión 👁️"); return
+    cortado=len(texto)>TEXTO_MAX
+    ultimo_doc[uid]=(nombre,texto[:TEXTO_MAX],time.time())
+    if cortado: await update.message.reply_text(f"(Archivo largo: leí los primeros {TEXTO_MAX} caracteres)")
+    await responder_sobre_doc(update,uid,pregunta or pregunta_defecto(nombre))
+
+# ---------- BÚSQUEDA EN INTERNET (varios respaldos) ----------
 _cache_busq={}
+_compound={"dia":"","n":0}
+def compound_disponible():
+    hoy=time.strftime("%Y-%m-%d")
+    if _compound["dia"]!=hoy: _compound.update(dia=hoy,n=0)
+    return USAR_COMPOUND and _compound["n"]<240
+
+def _buscar_compound(query):
+    _compound["n"]+=1
+    c=groq_client.chat.completions.create(
+        model="groq/compound-mini",
+        messages=[{"role":"system","content":"Search the web and answer with up-to-date facts in Spanish, max 8 lines, include dates. No intro."},
+                  {"role":"user","content":query}],
+        max_tokens=700)
+    return (c.choices[0].message.content or "").strip()
+
+def _buscar_ddgs(query):
+    items=DDGS(timeout=10).text(query,max_results=4,region="pe-es")
+    return "\n".join(f"- {i.get('title','')}: {i.get('body','')}" for i in items)
+
+def _buscar_wikipedia(query):
+    h={"User-Agent":"TelegramBot/1.0 (educational)"}
+    for lang in ("es","en"):
+        api=f"https://{lang}.wikipedia.org/w/api.php"
+        r=requests.get(api,params={"action":"query","list":"search","srsearch":query,"format":"json","srlimit":2},headers=h,timeout=10).json()
+        hits=r.get("query",{}).get("search",[])
+        if not hits: continue
+        title=hits[0]["title"]
+        e=requests.get(api,params={"action":"query","prop":"extracts","exintro":1,"explaintext":1,"titles":title,"format":"json"},headers=h,timeout=10).json()
+        page=next(iter(e.get("query",{}).get("pages",{}).values()),{})
+        ext=page.get("extract","")
+        if ext: return f"{title}: {ext[:1200]}"
+    return ""
+
+def _buscar_ddg_basico(query):
+    url=f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_html=1&skip_disambig=1"
+    r=requests.get(url,timeout=10).json()
+    res=r.get("AbstractText","")
+    if not res:
+        for tp in r.get("RelatedTopics",[])[:3]:
+            if isinstance(tp,dict) and "Text" in tp: res+=tp["Text"]+"\n"
+    return res
+
 def buscar_en_internet(query):
     q_lower=query.lower()
     if "keiko" in q_lower:
         query = query + " Keiko Fujimori presidenta Peru 2026"
     hit=_cache_busq.get(query)
     if hit and time.time()-hit[0]<600: return hit[1]
-    res=""
-    if DDGS:
+    fuentes=[]
+    if compound_disponible(): fuentes.append(_buscar_compound)
+    if DDGS: fuentes.append(_buscar_ddgs)
+    fuentes+= [_buscar_wikipedia,_buscar_ddg_basico]
+    for fn in fuentes:
         try:
-            items=DDGS().text(query,max_results=4,region="pe-es")
-            res="\n".join(f"- {i.get('title','')}: {i.get('body','')}" for i in items)
-        except Exception as e: logging.warning(f"ddgs falló: {e}")
-    if not res:
-        try:
-            url=f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_html=1&skip_disambig=1"
-            r=requests.get(url,timeout=10).json()
-            res=r.get("AbstractText","")
-            if not res:
-                for tp in r.get("RelatedTopics",[])[:3]:
-                    if isinstance(tp,dict) and "Text" in tp:
-                        res+=tp["Text"]+"\n"
-        except Exception: pass
-    res=res[:1800] if res else f"Info buscada sobre: {query}"
-    _cache_busq[query]=(time.time(),res)
-    return res
+            res=(fn(query) or "").strip()
+            if res:
+                res=res[:1800]
+                _cache_busq[query]=(time.time(),res)
+                return res
+        except Exception as e: logging.warning(f"Búsqueda {fn.__name__} falló: {e}")
+    return ""   # vacío = no se pudo conectar
 
 CLAVES_BUSQUEDA=["busca","que paso","qué pasó","que hay","noticias","quien es","quién es","keiko","presidenta","peru","perú",
                  "hoy","actual","último","ultimo","precio","cotización","clima","resultado","cuanto cuesta","cuánto cuesta"]
@@ -300,13 +479,13 @@ CLAVES_CLEAR=["borra la memoria","limpia la memoria","olvida todo","borra todo",
 
 # ---------- COMANDOS ----------
 async def start(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Qué onda {update.effective_user.first_name} bro! 🚀 V15\nCreo imágenes y analizo tus fotos 🔥🇵🇪\nUsa /ayuda para ver todo")
+    await update.message.reply_text(f"Qué onda {update.effective_user.first_name} bro! 🚀 V16\nCreo imágenes, analizo fotos y leo archivos 🔥🇵🇪\nUsa /ayuda para ver todo")
 async def ayuda_cmd(update,context):
     await update.message.reply_text(
         "Comandos (también puedes pedírmelos hablando normal):\n"
         "/imagen un gato → o dime 'dibuja un gato'\n"
         "  • agrega 'vertical' u 'horizontal' para el tamaño\n"
-        "  • usa los botones 🔄 para otra versión\n"
+        "  • botones 🔄 para otra versión\n"
         "/buscar tema → o dime 'busca tema'\n"
         "/clear → o dime 'borra la memoria'\n\n"
         "Fotos 🖼️: mándame una foto (con o sin pregunta):\n"
@@ -315,7 +494,9 @@ async def ayuda_cmd(update,context):
         "  • 'qué dice' → leo y traduzco el texto\n"
         "  • 'recrea esto en estilo anime' → creo una nueva\n"
         "  • también puedes responder (reply) a una foto con tu pregunta\n\n"
-        "Voz 🎧, PDFs 📄 y di 'en audio' para respuesta con voz 🎤")
+        "Archivos 📄: PDF, Word, Excel, TXT, CSV, JSON y código.\n"
+        "  • escribe tu pregunta en el pie del archivo, o pregunta después ('qué dice el archivo sobre...')\n\n"
+        "Voz 🎧 y di 'en audio' para respuesta con voz 🎤")
 async def clear_cmd(update,context):
     user_memories[update.effective_user.id]=[]; guardar_memorias()
     await update.message.reply_text("Memoria limpia 🧹 ahora prueba: Que hay de bueno con keiko la presidenta de peru")
@@ -326,7 +507,7 @@ async def buscar_cmd(update,context):
     if not context.args: await update.message.reply_text("Usa: /buscar keiko fujimori"); return
     q=" ".join(context.args)
     res=await asyncio.to_thread(buscar_en_internet,q)
-    await update.message.reply_text(f"Encontré:\n{res}")
+    await update.message.reply_text(f"Encontré:\n{res}" if res else "No pude conectar a internet ahora bro 😕 intenta de nuevo en un rato.")
 
 # ---------- CHAT PRINCIPAL ----------
 _ultimo_msg={}
@@ -343,17 +524,17 @@ async def ia_reply(update:Update, context:ContextTypes.DEFAULT_TYPE, texto_overr
     if any(x in low_o for x in CLAVES_CLEAR):
         await clear_cmd(update,context); return
 
-    # responder (reply) a una foto de otra persona/usuario con una pregunta
     rm=update.message.reply_to_message
     if rm and rm.photo and rm.from_user and not rm.from_user.is_bot and not any(v in low_o for v in VERBOS_CREAR):
-        try:
-            await procesar_foto(update,context,rm.photo[-1].file_id,texto_original)
+        try: await procesar_foto(update,context,rm.photo[-1].file_id,texto_original)
         except Exception as e: await update.message.reply_text(msg_error(e))
         return
-    # pregunta de seguimiento sobre tu última foto
     if es_pregunta_foto(low_o,user_id):
-        try:
-            await procesar_foto(update,context,ultima_foto[user_id][0],texto_original)
+        try: await procesar_foto(update,context,ultima_foto[user_id][0],texto_original)
+        except Exception as e: await update.message.reply_text(msg_error(e))
+        return
+    if es_pregunta_doc(low_o,user_id):
+        try: await responder_sobre_doc(update,user_id,texto_original)
         except Exception as e: await update.message.reply_text(msg_error(e))
         return
 
@@ -362,8 +543,9 @@ async def ia_reply(update:Update, context:ContextTypes.DEFAULT_TYPE, texto_overr
     if es_pedido_imagen(texto_corregido):
         await crear_imagen(update,texto_corregido); return
     t_low=texto_corregido.lower()
+    busco=any(x in t_low for x in CLAVES_BUSQUEDA)
     contexto_busqueda=""
-    if any(x in t_low for x in CLAVES_BUSQUEDA):
+    if busco:
         contexto_busqueda=await asyncio.to_thread(buscar_en_internet,texto_corregido)
     es_tradu=any(x in t_low for x in ["traduce","translate"])
     try:
@@ -386,8 +568,10 @@ async def ia_reply(update:Update, context:ContextTypes.DEFAULT_TYPE, texto_overr
             )
             temp=0.8
         msgs=list(memoria)
-        if contexto_busqueda:
+        if busco and contexto_busqueda:
             msgs[-1]={"role":"user","content":f"INFO INTERNET sobre '{texto_corregido}':\n{contexto_busqueda}\n\nPregunta: {texto_corregido}"}
+        elif busco:
+            msgs[-1]={"role":"user","content":f"(No pude conectar a internet ahora; responde con lo que sabes y avisa brevemente que puede estar desactualizado)\nPregunta: {texto_corregido}"}
         respuesta=await allm([{"role":"system","content":system_prompt},*msgs],max_tokens=1500,temperature=temp)
         memoria.append({"role":"assistant","content":respuesta[:1500]})
         user_memories[user_id]=memoria; guardar_memorias()
@@ -415,28 +599,12 @@ async def documento_handler(update,context):
     try:
         doc=update.message.document
         nombre=(doc.file_name or "").lower()
-        # imágenes enviadas como archivo -> se analizan como foto
+        caption=update.message.caption or ""
         if (doc.mime_type or "").startswith("image/") or nombre.endswith((".jpg",".jpeg",".png",".webp")):
-            caption=update.message.caption or ""
             if es_pedido_imagen(caption): await crear_imagen(update,caption); return
             await procesar_foto(update,context,doc.file_id,caption,doc.mime_type or "image/jpeg"); return
-        if not nombre.endswith(".pdf"): await update.message.reply_text("Solo PDFs o imágenes"); return
-        if not PDF_AVAILABLE: await update.message.reply_text("Falta PyPDF2"); return
-        await update.message.reply_text(f"Leyendo {doc.file_name} 📖...")
-        f=await doc.get_file(); buf=BytesIO(); await f.download_to_memory(buf); buf.seek(0)
-        reader=PyPDF2.PdfReader(buf); texto=""
-        for p in reader.pages[:5]:
-            try: texto+=(p.extract_text() or "")+"\n"
-            except: pass
-        texto=texto[:4000]
-        if not texto.strip(): await update.message.reply_text("No pude sacar texto del PDF (¿es escaneado?)"); return
-        resumen=await allm([{"role":"system","content":"Resume PDF breve"},{"role":"user","content":texto}],max_tokens=1000)
-        await enviar_largo(update,f"📄 Resumen:\n{resumen}")
-        mem=get_memory(update.effective_user.id)
-        mem.append({"role":"user","content":f"[Te envié el PDF '{doc.file_name}']"})
-        mem.append({"role":"assistant","content":f"Resumen del PDF '{doc.file_name}': {resumen[:1200]}"})
-        user_memories[update.effective_user.id]=mem[-14:]; guardar_memorias()
-    except Exception as e: await update.message.reply_text(f"Error PDF: {e}")
+        await procesar_archivo(update,context,doc,caption)
+    except Exception as e: await update.message.reply_text(f"Error archivo: {str(e)[:250]}")
 
 async def foto_handler(update,context):
     try:
@@ -461,5 +629,5 @@ if __name__=="__main__":
     app.add_handler(MessageHandler(filters.Document.ALL,documento_handler))
     app.add_handler(MessageHandler(filters.PHOTO,foto_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,ia_reply))
-    print("Bot V15 Imagenes y Vision iniciado 🔥")
+    print("Bot V16 iniciado 🔥")
     app.run_polling()
