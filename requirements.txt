@@ -9,3 +9,5 @@ tzdata
 pypdf
 python-docx
 openpyxl
+Pillow
+yt-dlp
