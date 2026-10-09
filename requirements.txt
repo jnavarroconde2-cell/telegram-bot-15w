@@ -4,3 +4,5 @@ flask
 requests
 PyPDF2
 gTTS
+ddgs
+tzdata
