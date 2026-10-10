@@ -1,4 +1,4 @@
-python-telegram-bot==20.7
+python-telegram-bot[job-queue]==20.7
 groq
 flask
 requests
@@ -11,3 +11,4 @@ python-docx
 openpyxl
 Pillow
 yt-dlp
+qrcode
