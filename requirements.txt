@@ -12,3 +12,4 @@ openpyxl
 Pillow
 yt-dlp
 qrcode
+imageio-ffmpeg
