@@ -3028,4 +3028,1395 @@ if __name__=="__main__":
     app.add_handler(MessageHandler(MSG & filters.TEXT & ~filters.COMMAND,ia_reply))
     print("Bot V27 iniciado 🔥")
     app.run_polling()
+# ======================================================================
+# ECONOMÍA (V28): monedas virtuales sin valor real. No gasta nada de la IA.
+# ======================================================================
+MONEDA="🪙"
+economia={}                                   # uid -> registro de la persona
+NOMBRES_ESTADO=NOMBRES_ESTADO+("economia",)   # se guarda en Upstash igual que lo demás
+_estado_base=_estado
+def _estado(n):
+    return economia if n=="economia" else _estado_base(n)
+
+def _cargar_uno(n):
+    if USA_KV:
+        est,datos=_leer_estado_kv(n)
+        if est=="error":
+            logging.warning(f"No pude leer '{n}' de Upstash: no escribiré encima hasta lograrlo (reintenta solo).")
+            return
+        _kv_ok.add(n); _aplicar_datos(n,datos,migrar=(est=="migrar"))
+    else:
+        try:
+            with open(f"{n}.json",'r',encoding='utf-8') as f: data=json.load(f)
+            _aplicar_datos(n,{_k(k):v for k,v in data.items()})
+        except Exception: pass
+_cargar_uno("economia")
+print(f"Economía cargada: {len(economia)} cuentas")
+
+ECO_INICIAL=100
+ECO_MIN_APUESTA=10
+ECO_MAX_APUESTA=5000
+
+# ---------- utilidades ----------
+def _hoy(): return datetime.now(LIMA).strftime("%Y-%m-%d")
+def fm(n): return f"{int(n):,}"
+def fmt_t(s):
+    s=int(s)
+    if s>=3600: return f"{s//3600} h {(s%3600)//60} min"
+    if s>=60: return f"{s//60} min {s%60} s"
+    return f"{s} s"
+def nivel(xp): return 1+int((max(xp,0)/40)**0.5)
+def xp_sig(lv): return lv*lv*40
+def barra(actual,meta,n=10):
+    p=0 if meta<=0 else max(0.0,min(1.0,actual/meta)); l=int(p*n)
+    return "▰"*l+"▱"*(n-l)
+
+def _num(txt,disp=0):
+    """'100', 'todo', 'mitad', '2k', '1.5m' -> entero (o None si no se entiende)."""
+    t=(txt or "").lower().replace(",","").strip()
+    if t in ("todo","all","max","todas"): return int(disp)
+    if t in ("mitad","half"): return int(disp)//2
+    m=re.fullmatch(r"(\d+(?:\.\d+)?)(k|m)?",t)
+    if not m: return None
+    return int(float(m.group(1))*{"k":1000,"m":1000000,None:1}[m.group(2)])
+
+# ---------- datos de cada persona ----------
+def _nuevo_reg():
+    return {"m":ECO_INICIAL,"b":0,"xp":0,"rc":0,"ud":"","ui":_hoy(),"cd":{},"inv":{},"bf":{},"lg":[],"mi":{},"st":{},"n":"","un":"","gs":[]}
+
+def _interes(r):
+    """Interés del banco: 0,5% diario (máx. 300 por día), se aplica al volver a usar la economía."""
+    hoy=_hoy(); ult=r.get("ui") or hoy
+    if ult!=hoy:
+        try: dias=(datetime.now(LIMA).date()-datetime.strptime(ult,"%Y-%m-%d").date()).days
+        except Exception: dias=0
+        for _ in range(min(max(dias,0),30)):
+            r["b"]+=min(int(r["b"]*0.005),300)
+    r["ui"]=hoy
+
+def eco_id(uid,nombre=""):
+    r=economia.get(uid)
+    if r is None:
+        r=_nuevo_reg(); r["n"]=nombre or "Usuario"; economia[uid]=r
+    else:
+        for k,v in _nuevo_reg().items(): r.setdefault(k,v)
+    _interes(r)
+    return r
+def eco(u):
+    r=eco_id(u.id); r["n"]=nombre_corto(u); r["un"]=(u.username or "").lower()
+    return r
+def eco_g(r,update):
+    if en_grupo(update):
+        cid=update.effective_chat.id
+        if cid not in r["gs"]:
+            r["gs"].append(cid); r["gs"]=r["gs"][-30:]
+def ecoguardar(*uids):
+    for x in uids: persistir("economia",x)
+def tot_eco(r): return r["m"]+r["b"]
+def espera(r,clave,seg):
+    """0 si ya puede hacerlo (y arranca la espera); si no, los segundos que faltan."""
+    t=time.time(); ult=r["cd"].get(clave,0)
+    if t-ult<seg: return int(seg-(t-ult))+1
+    r["cd"][clave]=t; return 0
+def mult_eco(r): return 2 if r["bf"].get("x2",0)>time.time() else 1
+
+def dar(r,coins,xp=0,boost=True):
+    """Suma monedas y experiencia. Devuelve el texto de subida de nivel (si la hubo)."""
+    lv0=nivel(r["xp"])
+    r["m"]+=int(coins*(mult_eco(r) if boost else 1)); r["xp"]+=int(xp)
+    lv1=nivel(r["xp"])
+    if lv1>lv0:
+        bono=50*lv1; r["m"]+=bono
+        return f"\n⭐ ¡Subiste al nivel {lv1}! Bono: +{fm(bono)} {MONEDA}"
+    return ""
+
+# ---------- misiones y logros ----------
+MISIONES={"trab":("Trabaja 2 veces",2,150),"act":("Mina, pesca o caza 3 veces",3,200),
+          "jue":("Juega 3 partidas",3,150),"dia":("Reclama tu /diario",1,100)}
+def _mis_estado(r):
+    mi=r["mi"]
+    if mi.get("f")!=_hoy():
+        mi.clear(); mi["f"]=_hoy()
+    return mi.setdefault("p",{}),mi.setdefault("ok",[])
+def progreso(r,clave,n=1):
+    p,ok=_mis_estado(r)
+    p[clave]=p.get(clave,0)+n
+    nom,meta,prem=MISIONES[clave]
+    if clave not in ok and p[clave]>=meta:
+        ok.append(clave); r["m"]+=prem
+        return f"\n🎯 ¡Misión cumplida: {nom}! +{fm(prem)} {MONEDA}"
+    return ""
+
+LOGROS={"novato":("🌱 Novato","Haz tu primera acción",50),
+        "ahorrador":("🏦 Ahorrador","Ten 5.000 en el banco",300),
+        "rico":("💎 Rico","Llega a 20.000 en total",1000),
+        "racha7":("🔥 Constante","7 días seguidos con /diario",500),
+        "apostador":("🎰 Apostador","Gana 20 partidas",400),
+        "ladron":("🕵️ Ladrón","Roba con éxito 5 veces",400),
+        "duelista":("⚔️ Duelista","Gana 3 duelos",300),
+        "nivel5":("⭐ Nivel 5","Llega al nivel 5",300),
+        "nivel10":("🌟 Nivel 10","Llega al nivel 10",1000)}
+def check_logros(r):
+    st=r["st"]
+    cond={"novato":True,"ahorrador":r["b"]>=5000,"rico":tot_eco(r)>=20000,"racha7":r["rc"]>=7,
+          "apostador":st.get("gan",0)>=20,"ladron":st.get("rob",0)>=5,"duelista":st.get("due",0)>=3,
+          "nivel5":nivel(r["xp"])>=5,"nivel10":nivel(r["xp"])>=10}
+    txt=""
+    for k,ok in cond.items():
+        if ok and k not in r["lg"]:
+            r["lg"].append(k); nom,_,p=LOGROS[k]; r["m"]+=p
+            txt+=f"\n🏆 ¡Logro: {nom}! +{fm(p)} {MONEDA}"
+    return txt
+
+# ---------- a quién va dirigido un comando ----------
+def _objetivo(update):
+    """(uid, nombre) de la persona a la que respondes o mencionas. (None,'@x') si no la conozco; (None,None) si no hay."""
+    m=update.message
+    rm=m.reply_to_message
+    if rm and rm.from_user and not rm.from_user.is_bot:
+        return rm.from_user.id,nombre_corto(rm.from_user)
+    for e in (m.entities or []):
+        if e.type=="text_mention" and e.user and not e.user.is_bot:
+            return e.user.id,nombre_corto(e.user)
+    for e in (m.entities or []):
+        if e.type=="mention":
+            un=m.parse_entity(e).lstrip("@").lower()
+            for uid,r in economia.items():
+                if r.get("un")==un: return uid,(r.get("n") or un)
+            return None,"@"+un
+    return None,None
+def _monto_arg(args,disp):
+    for a in args:
+        if not a.startswith("@"):
+            n=_num(a,disp)
+            if n is not None: return n
+    return None
+def _sin_objetivo(tnom,uso):
+    if tnom: return f"No conozco a {tnom} 🤔 Responde a un mensaje suyo con el comando (o pídele que use /saldo una vez)."
+    return uso
+
+# ---------- /saldo ----------
+async def saldo_cmd(update,context):
+    m=update.message; u=update.effective_user
+    tid,tnom=_objetivo(update)
+    if tid is None and tnom:
+        await m.reply_text(_sin_objetivo(tnom,"")); return
+    if tid is not None and tid!=u.id:
+        r=eco_id(tid,tnom); ecoguardar(tid); quien=r.get("n") or tnom
+    else:
+        r=eco(u); eco_g(r,update); ecoguardar(u.id); quien=r["n"]
+    lv=nivel(r["xp"]); base=(lv-1)**2*40
+    await m.reply_text(
+        f"💰 Cuenta de {quien}\n\n👛 Billetera: {fm(r['m'])} {MONEDA}\n🏦 Banco: {fm(r['b'])} {MONEDA}\n"
+        f"📊 Total: {fm(tot_eco(r))} {MONEDA}\n\n"
+        f"⭐ Nivel {lv} {barra(r['xp']-base,xp_sig(lv)-base)} ({fm(r['xp'])}/{fm(xp_sig(lv))} XP)\n"
+        f"🔥 Racha diaria: {r['rc']} días"
+        +(f"\n⚡ Potenciador x2 activo ({fmt_t(r['bf']['x2']-time.time())})" if mult_eco(r)==2 else "")
+        +"\n\nℹ️ /economia → todos los comandos")
+
+# ---------- /diario ----------
+async def diario_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update); hoy=_hoy()
+    if r["ud"]==hoy:
+        ecoguardar(u.id)
+        await m.reply_text(f"⏳ Ya reclamaste tu recompensa de hoy. Racha: {r['rc']} días. ¡Vuelve mañana!"); return
+    ayer=(datetime.now(LIMA).date()-timedelta(days=1)).strftime("%Y-%m-%d")
+    r["rc"]=r["rc"]+1 if r["ud"]==ayer else 1
+    r["ud"]=hoy
+    premio=100+25*min(r["rc"],30); bono=500 if r["rc"]%7==0 else 0
+    txt=dar(r,premio+bono,10,boost=False)+progreso(r,"dia")+check_logros(r)
+    ecoguardar(u.id)
+    await m.reply_text(f"🎁 Recompensa diaria: +{fm(premio)} {MONEDA}"
+                       +(f"\n🔥 ¡Bono de racha de 7 días! +{fm(bono)} {MONEDA}" if bono else "")
+                       +f"\nRacha: {r['rc']} días 🔥\n👛 Ahora tienes {fm(r['m'])} {MONEDA}"+txt)
+
+# ---------- /trabajar /minar /pescar /cazar ----------
+ACTIVIDADES={
+ "trabajar":{"cd":1800,"lo":60,"hi":160,"herr":None,"em":"💼","mis":"trab","fallo":0,
+             "textos":["Hiciste turnos extra en la bodega","Repartiste pedidos en moto","Atendiste en la cevichería","Arreglaste unas computadoras","Vendiste en el mercado"]},
+ "minar":{"cd":2700,"lo":80,"hi":220,"herr":"pico","em":"⛏️","mis":"act","fallo":0,
+          "textos":["Picaste en la mina y sacaste oro","Encontraste una veta de plata","Excavaste cobre en la montaña"]},
+ "pescar":{"cd":2400,"lo":70,"hi":200,"herr":"cana","em":"🎣","mis":"act","fallo":0,
+           "textos":["Pescaste unas truchas enormes","Sacaste un pejerrey de buen tamaño","Atrapaste una corvina y la vendiste"]},
+ "cazar":{"cd":3000,"lo":90,"hi":250,"herr":"arco","em":"🏹","mis":"act","fallo":0.2,
+          "textos":["Cazaste una vizcacha y vendiste la piel","Atrapaste un venado en el bosque","Cobraste una buena presa"],
+          "fallo_txt":"La presa escapó y volviste con las manos vacías"}}
+
+async def _actividad(update,nombre):
+    c=ACTIVIDADES[nombre]; m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update)
+    falta=espera(r,nombre,c["cd"])
+    if falta:
+        ecoguardar(u.id)
+        await m.reply_text(f"{c['em']} Estás descansando. Vuelve en {fmt_t(falta)}."); return
+    if random.random()<c["fallo"]:
+        r["xp"]+=2; txt=progreso(r,c["mis"]); ecoguardar(u.id)
+        await m.reply_text(f"{c['em']} {c['fallo_txt']} 😅 (+2 XP)"+txt); return
+    base=random.randint(c["lo"],c["hi"])+nivel(r["xp"])*5
+    herr=bool(c["herr"] and r["inv"].get(c["herr"],0)>0)
+    if herr: base=int(base*1.5)
+    ganado=base*mult_eco(r)
+    txt=dar(r,base,8)+progreso(r,c["mis"])
+    r["st"][nombre]=r["st"].get(nombre,0)+1
+    txt+=check_logros(r); ecoguardar(u.id)
+    await m.reply_text(f"{c['em']} {random.choice(c['textos'])}.\n+{fm(ganado)} {MONEDA}"
+                       +(" (herramienta +50%)" if herr else "")+(" ⚡x2" if mult_eco(r)==2 else "")
+                       +f"\n👛 Billetera: {fm(r['m'])} {MONEDA}"+txt)
+async def trabajar_cmd(update,context): await _actividad(update,"trabajar")
+async def minar_cmd(update,context): await _actividad(update,"minar")
+async def pescar_cmd(update,context): await _actividad(update,"pescar")
+async def cazar_cmd(update,context): await _actividad(update,"cazar")
+
+# ---------- banco ----------
+async def depositar_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update)
+    args=context.args or []
+    n=_num(args[0] if args else "",r["m"])
+    if n is None or n<1:
+        await m.reply_text("Usa: /depositar 100 (o /depositar todo). El banco te protege de robos y da 0,5% diario 🏦"); return
+    if n>r["m"]:
+        await m.reply_text(f"No tienes tanto en la billetera ({fm(r['m'])} {MONEDA})."); return
+    r["m"]-=n; r["b"]+=n; txt=check_logros(r); ecoguardar(u.id)
+    await m.reply_text(f"🏦 Depositaste {fm(n)} {MONEDA}.\n👛 Billetera: {fm(r['m'])} · 🏦 Banco: {fm(r['b'])}"+txt)
+async def retirar_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update)
+    args=context.args or []
+    n=_num(args[0] if args else "",r["b"])
+    if n is None or n<1:
+        await m.reply_text("Usa: /retirar 100 (o /retirar todo)"); return
+    if n>r["b"]:
+        await m.reply_text(f"No tienes tanto en el banco ({fm(r['b'])} {MONEDA})."); return
+    r["b"]-=n; r["m"]+=n; ecoguardar(u.id)
+    await m.reply_text(f"🏦 Retiraste {fm(n)} {MONEDA}.\n👛 Billetera: {fm(r['m'])} · 🏦 Banco: {fm(r['b'])}")
+
+# ---------- /transferir ----------
+async def transferir_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update)
+    tid,tnom=_objetivo(update)
+    if tid is None:
+        await m.reply_text(_sin_objetivo(tnom,"Usa: /transferir @usuario 100 (o responde a su mensaje con /transferir 100)")); return
+    if tid==u.id:
+        await m.reply_text("No puedes enviarte monedas a ti mismo 😅"); return
+    n=_monto_arg(context.args or [],r["m"])
+    if n is None or n<1:
+        await m.reply_text("Indica cuántas monedas: /transferir @usuario 100"); return
+    if nivel(r["xp"])<2:
+        await m.reply_text("Necesitas nivel 2 para transferir ⭐ (gana XP con /trabajar y /diario)."); return
+    hoy=_hoy(); env=r["st"].get("env") or ["",0]
+    if env[0]!=hoy: env=[hoy,0]
+    if env[1]+n>10000:
+        await m.reply_text(f"Límite diario de envíos: 10.000 {MONEDA}. Hoy te quedan {fm(max(0,10000-env[1]))}."); return
+    fee=max(1,int(n*0.02))
+    if n+fee>r["m"]:
+        await m.reply_text(f"Necesitas {fm(n+fee)} {MONEDA} ({fm(n)} + {fm(fee)} de comisión del 2%). Tienes {fm(r['m'])}."); return
+    dest=eco_id(tid,tnom)
+    r["m"]-=n+fee; dest["m"]+=n; env[1]+=n; r["st"]["env"]=env
+    ecoguardar(u.id,tid)
+    await m.reply_text(f"💸 Enviaste {fm(n)} {MONEDA} a {dest.get('n') or tnom} (comisión {fm(fee)}).\n👛 Te quedan {fm(r['m'])} {MONEDA}")
+
+# ---------- /top ----------
+async def top_cmd(update,context):
+    m=update.message; cid=update.effective_chat.id
+    glob=(not en_grupo(update)) or bool(context.args and context.args[0].lower() in ("global","mundial"))
+    filas=sorted(((tot_eco(r),r.get("n") or "?",uid) for uid,r in economia.items() if glob or cid in r.get("gs",[])),reverse=True)
+    if not filas:
+        await m.reply_text("Aún no hay nadie en el ranking. ¡Usa /diario para empezar!"); return
+    med=["🥇","🥈","🥉"]
+    lineas=[f"{med[i] if i<3 else str(i+1)+'.'} {nom} — {fm(t)} {MONEDA}" for i,(t,nom,_) in enumerate(filas[:10])]
+    yo=next((i+1 for i,(_,_,uid) in enumerate(filas) if uid==update.effective_user.id),None)
+    await m.reply_text(("🌎 TOP GLOBAL" if glob else "🏆 TOP DEL GRUPO")+"\n\n"+"\n".join(lineas)
+                       +(f"\n\nTu posición: #{yo}" if yo else "\n\nAún no estás en el ranking (usa /diario)."))
+
+# ---------- tienda, inventario y objetos ----------
+ITEMS={"candado":("🔒 Candado",400,"Bloquea el próximo robo contra ti (se gasta al bloquear)"),
+       "ganzua":("🗝️ Ganzúa",900,"+15% de éxito en tu próximo robo (1 uso)"),
+       "pico":("⛏️ Pico",1500,"+50% al /minar (permanente)"),
+       "cana":("🎣 Caña",1200,"+50% al /pescar (permanente)"),
+       "arco":("🏹 Arco",1800,"+50% al /cazar (permanente)"),
+       "x2":("⚡ Potenciador x2",2500,"Duplica lo que ganas al trabajar, minar, pescar y cazar por 60 min (actívalo con /usar x2)")}
+PERMANENTES=("pico","cana","arco")
+def teclado_tienda():
+    return InlineKeyboardMarkup([[InlineKeyboardButton(f"{v[0]} · {fm(v[1])}",callback_data=f"tn:{k}")] for k,v in ITEMS.items()])
+def _comprar(r,clave,cant):
+    nombre,precio,_=ITEMS[clave]
+    if clave in PERMANENTES:
+        if r["inv"].get(clave,0)>0: return "Ya tienes ese objeto 😉"
+        cant=1
+    if cant<1 or cant>10: return "Puedes comprar de 1 a 10 a la vez."
+    costo=precio*cant
+    if r["m"]<costo: return f"Te faltan {fm(costo-r['m'])} {MONEDA} (cuesta {fm(costo)})."
+    r["m"]-=costo; r["inv"][clave]=r["inv"].get(clave,0)+cant
+    return f"✅ Compraste {cant} × {nombre} por {fm(costo)} {MONEDA}. Te quedan {fm(r['m'])} {MONEDA}."
+async def tienda_cmd(update,context):
+    txt="🛒 TIENDA\n\n"+"\n".join(f"{v[0]} — {fm(v[1])} {MONEDA}\n   {v[2]}" for v in ITEMS.values())
+    await update.message.reply_text(txt+"\n\nToca un botón para comprar 1, o usa /comprar objeto cantidad",reply_markup=teclado_tienda())
+async def tienda_callback(update,context):
+    q=update.callback_query; clave=q.data.split(":",1)[1]
+    if clave not in ITEMS: await q.answer(); return
+    r=eco(q.from_user); msg=_comprar(r,clave,1); ecoguardar(q.from_user.id)
+    await q.answer(msg[:190],show_alert=True)
+async def comprar_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update)
+    args=[a.lower() for a in (context.args or [])]
+    alias={"candado":"candado","ganzua":"ganzua","ganzúa":"ganzua","pico":"pico","cana":"cana","caña":"cana","arco":"arco","x2":"x2","potenciador":"x2"}
+    clave=alias.get(args[0]) if args else None
+    if not clave:
+        await m.reply_text("Usa: /comprar candado 2 · mira los objetos en /tienda"); return
+    cant=int(args[1]) if len(args)>1 and args[1].isdigit() else 1
+    msg=_comprar(r,clave,cant); ecoguardar(u.id)
+    await m.reply_text(msg)
+async def inventario_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update); ecoguardar(u.id)
+    lineas=[f"{ITEMS[k][0]} × {n}" for k,n in r["inv"].items() if n>0 and k in ITEMS]
+    if mult_eco(r)==2: lineas.append(f"⚡ Potenciador x2 activo: {fmt_t(r['bf']['x2']-time.time())}")
+    await m.reply_text("🎒 INVENTARIO\n\n"+("\n".join(lineas) if lineas else "(vacío) Mira la /tienda"))
+async def usar_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update)
+    clave=(context.args[0].lower() if context.args else "")
+    if clave=="x2":
+        if r["inv"].get("x2",0)<1:
+            await m.reply_text("No tienes potenciadores ⚡ Cómpralo en /tienda"); return
+        r["inv"]["x2"]-=1; r["bf"]["x2"]=max(time.time(),r["bf"].get("x2",0))+3600; ecoguardar(u.id)
+        await m.reply_text("⚡ ¡Potenciador activado! Por 60 minutos ganas el doble al trabajar, minar, pescar y cazar."); return
+    if clave in ITEMS:
+        await m.reply_text("Ese objeto funciona solo: se usa automáticamente cuando hace falta 😉 (solo el potenciador se activa con /usar x2)"); return
+    await m.reply_text("Usa: /usar x2")
+
+# ---------- /nivel /logros /misiones ----------
+async def nivel_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update); ecoguardar(u.id)
+    lv=nivel(r["xp"]); base=(lv-1)**2*40
+    await m.reply_text(f"⭐ Nivel {lv}\n{barra(r['xp']-base,xp_sig(lv)-base)}\nXP: {fm(r['xp'])} / {fm(xp_sig(lv))}\nTe faltan {fm(xp_sig(lv)-r['xp'])} XP para el nivel {lv+1}.\n\nGanas XP trabajando, jugando y con el /diario.")
+async def logros_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update); txt=check_logros(r); ecoguardar(u.id)
+    lineas=[f"{'✅' if k in r['lg'] else '🔒'} {nom} — {desc} (+{fm(p)} {MONEDA})" for k,(nom,desc,p) in LOGROS.items()]
+    await m.reply_text(f"🏆 LOGROS ({len(r['lg'])}/{len(LOGROS)})\n\n"+"\n".join(lineas)+txt)
+async def misiones_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update)
+    p,ok=_mis_estado(r); ecoguardar(u.id)
+    lineas=[f"{'✅' if k in ok else '▫️'} {nom}: {min(p.get(k,0),meta)}/{meta} (+{fm(prem)} {MONEDA})" for k,(nom,meta,prem) in MISIONES.items()]
+    await m.reply_text("🎯 MISIONES DE HOY\n\n"+"\n".join(lineas)+"\n\nSe reinician cada día y el premio se da solo al cumplirlas.")
+
+# ---------- comandos del admin del bot ----------
+async def darmonedas_cmd(update,context):
+    m=update.message
+    if not es_admin(update): await m.reply_text("Solo el admin del bot 🔒"); return
+    tid,tnom=_objetivo(update); n=_monto_arg(context.args or [],0)
+    if tid is None or not n or n<1:
+        await m.reply_text(_sin_objetivo(tnom,"Usa: /darmonedas @usuario 500 (o responde a su mensaje)")); return
+    v=eco_id(tid,tnom); v["m"]+=n; ecoguardar(tid)
+    await m.reply_text(f"✅ Le di {fm(n)} {MONEDA} a {v.get('n') or tnom}.")
+async def quitarmonedas_cmd(update,context):
+    m=update.message
+    if not es_admin(update): await m.reply_text("Solo el admin del bot 🔒"); return
+    tid,tnom=_objetivo(update); n=_monto_arg(context.args or [],0)
+    if tid is None or not n or n<1:
+        await m.reply_text(_sin_objetivo(tnom,"Usa: /quitarmonedas @usuario 500 (o responde a su mensaje)")); return
+    v=economia.get(tid)
+    if v is None: await m.reply_text("Esa persona no tiene cuenta."); return
+    q=min(n,v["m"]); v["m"]-=q; ecoguardar(tid)
+    await m.reply_text(f"✅ Le quité {fm(q)} {MONEDA} a {v.get('n') or tnom}.")
+async def reiniciareco_cmd(update,context):
+    m=update.message
+    if not es_admin(update): await m.reply_text("Solo el admin del bot 🔒"); return
+    args=[a.lower() for a in (context.args or [])]
+    if args[:2]==["todos","confirmar"]:
+        economia.clear()
+        for x in list(_sucio):
+            if x[0]=="economia": _sucio.discard(x)
+        if USA_KV: await asyncio.to_thread(_kv_cmd,["DEL","bot:h:economia"])
+        else: persistir("economia")
+        await m.reply_text("🧹 Reinicié la economía de TODOS."); return
+    tid,tnom=_objetivo(update)
+    if tid is None:
+        await m.reply_text(_sin_objetivo(tnom,"Usa: /reiniciareco @usuario (o responde a su mensaje)\nPara reiniciar a todos: /reiniciareco todos confirmar")); return
+    economia.pop(tid,None)
+    for x in list(_sucio):
+        if x==("economia",tid): _sucio.discard(x)
+    if USA_KV: await asyncio.to_thread(_borrar_kv,[("economia",tid)])
+    else: persistir("economia")
+    await m.reply_text(f"🧹 Reinicié la cuenta de {tnom or tid}.")
+# ======================================================================
+# ECONOMÍA: JUEGOS, ROBOS, DUELOS, LLUVIA, SORTEOS Y FINANZAS
+# ======================================================================
+async def _editar(q,texto,kb=None):
+    try: await q.edit_message_text(texto,reply_markup=kb)
+    except Exception: pass
+
+# ---------- apuestas ----------
+async def _preparar(update,context,indice,uso):
+    """Valida la apuesta. Devuelve (registro, usuario, monto) o None (ya respondió)."""
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update)
+    args=context.args or []
+    n=_num(args[indice] if len(args)>indice else "",min(r["m"],ECO_MAX_APUESTA))
+    if n is None or n<ECO_MIN_APUESTA or n>ECO_MAX_APUESTA:
+        ecoguardar(u.id)
+        await m.reply_text(f"Apuesta entre {fm(ECO_MIN_APUESTA)} y {fm(ECO_MAX_APUESTA)} {MONEDA}. Ejemplo: {uso}"); return None
+    if n>r["m"]:
+        ecoguardar(u.id)
+        await m.reply_text(f"No tienes tanto en la billetera ({fm(r['m'])} {MONEDA})."); return None
+    falta=espera(r,"juego",8)
+    if falta:
+        ecoguardar(u.id)
+        await m.reply_text(f"⏳ Espera {falta} s para la siguiente partida."); return None
+    return r,u,n
+
+def _liquidar(r,n,devolucion):
+    """n = apuesta; devolucion = lo que regresa a la billetera (0 si pierde). Devuelve textos extra (nivel, misión, logros)."""
+    r["m"]-=n; r["m"]+=devolucion
+    st=r["st"]; st["jug"]=st.get("jug",0)+1
+    if devolucion>n: st["gan"]=st.get("gan",0)+1
+    return dar(r,0,3,boost=False)+progreso(r,"jue")+check_logros(r)
+
+async def apostar_cmd(update,context):
+    p=await _preparar(update,context,0,"/apostar 100 cara")
+    if not p: return
+    r,u,n=p
+    lado=(context.args[1].lower() if len(context.args)>1 else "cara")
+    if lado not in ("cara","cruz"): lado="cara"
+    gana=random.random()<0.47
+    sale=lado if gana else ("cruz" if lado=="cara" else "cara")
+    txt=_liquidar(r,n,n*2 if gana else 0); ecoguardar(u.id)
+    await update.message.reply_text(f"🪙 Elegiste {lado}... salió {sale}.\n"
+                                    +(f"🎉 ¡Ganaste +{fm(n)} {MONEDA}!" if gana else f"😢 Perdiste -{fm(n)} {MONEDA}.")
+                                    +f"\n👛 Billetera: {fm(r['m'])} {MONEDA}"+txt)
+
+async def dado_cmd(update,context):
+    p=await _preparar(update,context,0,"/dado 100")
+    if not p: return
+    r,u,n=p
+    a=random.randint(1,6); b=random.randint(1,6)
+    dev=n*2 if a>b else (n if a==b else 0)
+    txt=_liquidar(r,n,dev); ecoguardar(u.id)
+    res="🎉 ¡Ganaste!" if a>b else ("🤝 Empate, te devuelvo la apuesta." if a==b else "😢 Perdiste.")
+    await update.message.reply_text(f"🎲 Tú sacaste {a} · el bot sacó {b}\n{res}\n👛 Billetera: {fm(r['m'])} {MONEDA}"+txt)
+
+ROJOS={1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+async def ruleta_cmd(update,context):
+    args=[a.lower() for a in (context.args or [])]
+    tipo=args[1] if len(args)>1 else ""
+    if not (tipo in ("rojo","negro","verde","par","impar") or (tipo.isdigit() and 0<=int(tipo)<=36)):
+        await update.message.reply_text("Usa: /ruleta 100 rojo\nOpciones: rojo, negro, par, impar (pagan 1:1) · verde o un número del 0 al 36 (paga 35:1)"); return
+    p=await _preparar(update,context,0,"/ruleta 100 rojo")
+    if not p: return
+    r,u,n=p
+    sale=random.randint(0,36)
+    color="🟢" if sale==0 else ("🔴" if sale in ROJOS else "⚫")
+    if tipo=="rojo": mult=2 if sale in ROJOS else 0
+    elif tipo=="negro": mult=2 if (sale!=0 and sale not in ROJOS) else 0
+    elif tipo=="par": mult=2 if (sale!=0 and sale%2==0) else 0
+    elif tipo=="impar": mult=2 if sale%2==1 else 0
+    elif tipo=="verde": mult=36 if sale==0 else 0
+    else: mult=36 if sale==int(tipo) else 0
+    txt=_liquidar(r,n,n*mult); ecoguardar(u.id)
+    await update.message.reply_text(f"🎡 Salió {color} {sale}\n"
+                                    +(f"🎉 ¡Ganaste +{fm(n*mult-n)} {MONEDA}!" if mult else f"😢 Perdiste -{fm(n)} {MONEDA}.")
+                                    +f"\n👛 Billetera: {fm(r['m'])} {MONEDA}"+txt)
+
+SIMB=["🍒","🍋","🍇","🔔","💎","7️⃣"]; PESOS=[30,25,20,13,8,4]
+PAGO3={"🍒":3,"🍋":4,"🍇":6,"🔔":10,"💎":25,"7️⃣":60}
+async def tragamonedas_cmd(update,context):
+    p=await _preparar(update,context,0,"/tragamonedas 100")
+    if not p: return
+    r,u,n=p
+    rod=random.choices(SIMB,weights=PESOS,k=3)
+    if len(set(rod))==1: mult=PAGO3[rod[0]]; res=f"💥 ¡TRES IGUALES! x{mult}"
+    elif len(set(rod))==2: mult=1.4; res="✨ Dos iguales: x1,4"
+    else: mult=0; res="😢 Nada esta vez"
+    dev=int(n*mult)
+    txt=_liquidar(r,n,dev); ecoguardar(u.id)
+    await update.message.reply_text(f"🎰 [ {' | '.join(rod)} ]\n{res}\n"
+                                    +(f"🎉 Ganas +{fm(dev-n)} {MONEDA}" if dev>n else f"Pierdes {fm(n-dev)} {MONEDA}")
+                                    +f"\n👛 Billetera: {fm(r['m'])} {MONEDA}"+txt)
+
+# ---------- blackjack ----------
+BJ_RANGOS=["A","2","3","4","5","6","7","8","9","10","J","Q","K"]
+bj_juegos={}   # uid -> partida abierta
+def _bj_valor(mano):
+    t=0; ases=0
+    for c in mano:
+        if c=="A": t+=11; ases+=1
+        elif c in ("J","Q","K"): t+=10
+        else: t+=int(c)
+    while t>21 and ases:
+        t-=10; ases-=1
+    return t
+def _bj_carta(): return random.choice(BJ_RANGOS)
+def _bj_texto(g,final=False,nota=""):
+    d=(" ".join(g["dealer"])+f" ({_bj_valor(g['dealer'])})") if final else (g["dealer"][0]+" ❓")
+    return (f"🃏 BLACKJACK · apuesta {fm(g['n'])} {MONEDA}\n\nTú: {' '.join(g['mano'])} ({_bj_valor(g['mano'])})\nCrupier: {d}"
+            +(f"\n\n{nota}" if nota else ""))
+def teclado_bj():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🃏 Pedir",callback_data="bj:pedir"),
+                                  InlineKeyboardButton("✋ Plantarse",callback_data="bj:plantar")]])
+def _bj_cerrar(r,g,dev):
+    """La apuesta ya se descontó al empezar: aquí solo se devuelve lo que corresponde."""
+    n=g["n"]; r["m"]+=dev
+    st=r["st"]; st["jug"]=st.get("jug",0)+1
+    if dev>n: st["gan"]=st.get("gan",0)+1
+    return dar(r,0,3,boost=False)+progreso(r,"jue")+check_logros(r)
+
+async def blackjack_cmd(update,context):
+    m=update.message; u=update.effective_user
+    g0=bj_juegos.get(u.id)
+    if g0 and time.time()-g0["t"]<600:
+        await m.reply_text("Ya tienes una partida abierta 🃏 termínala con sus botones (si la abandonas, pierdes la apuesta)."); return
+    p=await _preparar(update,context,0,"/blackjack 100")
+    if not p: return
+    r,u,n=p
+    r["m"]-=n   # la apuesta se descuenta al empezar
+    g={"n":n,"mano":[_bj_carta(),_bj_carta()],"dealer":[_bj_carta(),_bj_carta()],"t":time.time(),"mid":0}
+    if _bj_valor(g["mano"])==21:   # blackjack natural
+        if _bj_valor(g["dealer"])==21: dev=n; nota="🤝 Empate: ambos tienen blackjack. Te devuelvo tu apuesta."
+        else: dev=int(n*2.5); nota=f"🎉 ¡BLACKJACK! Ganas +{fm(dev-n)} {MONEDA}"
+        txt=_bj_cerrar(r,g,dev); ecoguardar(u.id)
+        await m.reply_text(_bj_texto(g,True,nota)+f"\n👛 Billetera: {fm(r['m'])} {MONEDA}"+txt); return
+    bj_juegos[u.id]=g   # se registra ANTES de enviar, así no se pueden abrir dos a la vez
+    try: sent=await m.reply_text(_bj_texto(g),reply_markup=teclado_bj())
+    except Exception:
+        bj_juegos.pop(u.id,None); r["m"]+=n; ecoguardar(u.id); return
+    g["mid"]=sent.message_id; ecoguardar(u.id)
+
+async def bj_callback(update,context):
+    q=update.callback_query; uid=q.from_user.id
+    g=bj_juegos.get(uid)
+    if not g or g["mid"]!=q.message.message_id:
+        await q.answer("Esta partida no es tuya o ya terminó 🃏",show_alert=True); return
+    r=eco(q.from_user)
+    if q.data=="bj:pedir":
+        g["mano"].append(_bj_carta()); v=_bj_valor(g["mano"])
+        if v>21:
+            bj_juegos.pop(uid,None); txt=_bj_cerrar(r,g,0); ecoguardar(uid)
+            await q.answer()
+            await _editar(q,_bj_texto(g,True,f"💥 Te pasaste de 21. Pierdes {fm(g['n'])} {MONEDA}.")+f"\n👛 Billetera: {fm(r['m'])} {MONEDA}"+txt); return
+        if v<21:
+            await q.answer(); await _editar(q,_bj_texto(g),teclado_bj()); return
+        # con 21 se planta solo
+    bj_juegos.pop(uid,None)
+    while _bj_valor(g["dealer"])<17: g["dealer"].append(_bj_carta())
+    pj=_bj_valor(g["mano"]); pd=_bj_valor(g["dealer"]); n=g["n"]
+    if pd>21 or pj>pd: dev=n*2; nota=f"🎉 ¡Ganaste! +{fm(n)} {MONEDA}"
+    elif pj==pd: dev=n; nota="🤝 Empate: te devuelvo tu apuesta."
+    else: dev=0; nota=f"😢 Perdiste {fm(n)} {MONEDA}."
+    txt=_bj_cerrar(r,g,dev); ecoguardar(uid)
+    await q.answer()
+    await _editar(q,_bj_texto(g,True,nota)+f"\n👛 Billetera: {fm(r['m'])} {MONEDA}"+txt)
+
+# ---------- /robar ----------
+async def robar_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update)
+    tid,tnom=_objetivo(update)
+    if tid is None:
+        await m.reply_text(_sin_objetivo(tnom,"Usa: /robar @usuario (o responde a su mensaje con /robar) 🕵️")); return
+    if tid==u.id: await m.reply_text("No puedes robarte a ti mismo 😂"); return
+    v=economia.get(tid)
+    if v is None: await m.reply_text("Esa persona aún no tiene cuenta 🤷"); return
+    if nivel(r["xp"])<2:
+        await m.reply_text("Necesitas nivel 2 para robar ⭐ Gana XP con /trabajar y /diario."); return
+    if v["m"]<100:
+        await m.reply_text("No vale la pena: tiene menos de 100 en la billetera 😅 (lo que está en el banco no se puede robar)"); return
+    if time.time()-v["st"].get("robado",0)<600:
+        await m.reply_text("Lo robaron hace poco, déjalo respirar 😅"); return
+    falta=espera(r,"robar",3600)
+    if falta:
+        ecoguardar(u.id)
+        await m.reply_text(f"🕵️ La policía anda cerca. Vuelve en {fmt_t(falta)}."); return
+    nv=v.get("n") or tnom
+    if v["inv"].get("candado",0)>0:
+        v["inv"]["candado"]-=1
+        multa=min(100,r["m"]); r["m"]-=multa; v["m"]+=multa
+        ecoguardar(u.id,tid)
+        await m.reply_text(f"🔒 {nv} tenía un candado y bloqueó tu robo. Pagas {fm(multa)} {MONEDA} de multa."); return
+    prob=0.45
+    if r["inv"].get("ganzua",0)>0: r["inv"]["ganzua"]-=1; prob+=0.15
+    if random.random()<prob:
+        botin=min(int(v["m"]*random.uniform(0.10,0.30)),2000)
+        v["m"]-=botin; r["m"]+=botin; v["st"]["robado"]=time.time(); r["st"]["rob"]=r["st"].get("rob",0)+1
+        txt=dar(r,0,10,boost=False)+check_logros(r); ecoguardar(u.id,tid)
+        await m.reply_text(f"🕵️ ¡Éxito! Le robaste {fm(botin)} {MONEDA} a {nv}.\n👛 Ahora tienes {fm(r['m'])} {MONEDA}"+txt)
+    else:
+        multa=min(int(r["m"]*0.2),500); r["m"]-=multa; v["m"]+=multa
+        ecoguardar(u.id,tid)
+        await m.reply_text(f"🚨 ¡Te atraparon! Pagas {fm(multa)} {MONEDA} de multa a {nv}.")
+
+# ---------- /duelo ----------
+duelos={}   # (chat, mensaje) -> reto
+async def duelo_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update)
+    tid,tnom=_objetivo(update)
+    uso="Usa: /duelo @usuario 100 (o responde a su mensaje con /duelo 100) ⚔️"
+    if tid is None:
+        await m.reply_text(_sin_objetivo(tnom,uso)); return
+    if tid==u.id: await m.reply_text("No puedes retarte a ti mismo 😂"); return
+    n=_monto_arg(context.args or [],min(r["m"],ECO_MAX_APUESTA))
+    if n is None or n<ECO_MIN_APUESTA or n>ECO_MAX_APUESTA:
+        await m.reply_text(f"Apuesta entre {fm(ECO_MIN_APUESTA)} y {fm(ECO_MAX_APUESTA)} {MONEDA}.\n{uso}"); return
+    if r["m"]<n: await m.reply_text(f"No tienes tanto en la billetera ({fm(r['m'])} {MONEDA})."); return
+    v=economia.get(tid)
+    if v is None: await m.reply_text("Esa persona aún no tiene cuenta 🤷"); return
+    if v["m"]<n: await m.reply_text("Esa persona no tiene suficientes monedas para ese duelo."); return
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("⚔️ Aceptar",callback_data="du:ok"),InlineKeyboardButton("❌ Rechazar",callback_data="du:no")]])
+    sent=await m.reply_text(f"⚔️ {r['n']} reta a {v.get('n') or tnom} a un duelo por {fm(n)} {MONEDA}.\n¿Aceptas? (2 minutos)",reply_markup=kb)
+    duelos[(sent.chat_id,sent.message_id)]={"a":u.id,"b":tid,"n":n,"t":time.time()}
+    ecoguardar(u.id)
+
+async def duelo_callback(update,context):
+    q=update.callback_query; u=q.from_user
+    key=(q.message.chat_id,q.message.message_id); d=duelos.get(key)
+    if not d:
+        await q.answer("Este duelo ya terminó ⚔️",show_alert=True); return
+    if time.time()-d["t"]>120:
+        duelos.pop(key,None); await q.answer("El reto expiró",show_alert=True); await _editar(q,"⌛ El duelo expiró."); return
+    if q.data=="du:no":
+        if u.id not in (d["a"],d["b"]):
+            await q.answer("Este reto no es tuyo",show_alert=True); return
+        duelos.pop(key,None); await q.answer(); await _editar(q,"❌ Duelo cancelado."); return
+    if u.id!=d["b"]:
+        await q.answer("Este reto no es para ti 😅",show_alert=True); return
+    a=economia.get(d["a"]); b=economia.get(d["b"]); n=d["n"]
+    if not a or not b or a["m"]<n or b["m"]<n:
+        duelos.pop(key,None); await q.answer()
+        await _editar(q,"⚠️ Alguno ya no tiene suficientes monedas. Duelo cancelado."); return
+    duelos.pop(key,None)
+    gan,per=(a,b) if random.random()<0.5 else (b,a)
+    premio=int(n*0.95)
+    per["m"]-=n; gan["m"]+=premio; gan["st"]["due"]=gan["st"].get("due",0)+1
+    txt=dar(gan,0,15,boost=False)+check_logros(gan)
+    ecoguardar(d["a"],d["b"]); await q.answer()
+    await _editar(q,f"⚔️ ¡DUELO!\n\n🏆 Ganó {gan['n']} y se lleva {fm(premio)} {MONEDA}\n😢 {per['n']} pierde {fm(n)} {MONEDA}"+txt)
+
+# ---------- /lluvia (solo admins del grupo; el premio sale de su billetera) ----------
+lluvias={}   # (chat, mensaje) -> lluvia activa
+async def lluvia_cmd(update,context):
+    m=update.message; u=update.effective_user
+    if not en_grupo(update): await m.reply_text("La lluvia es para grupos 👥"); return
+    if not await es_admin_grupo(update,context):
+        await m.reply_text("Solo los administradores del grupo pueden lanzar una lluvia 🔒"); return
+    r=eco(u); libre=es_admin(update); args=context.args or []
+    monto=_num(args[0] if args else "",r["m"])
+    pers=int(args[1]) if len(args)>1 and args[1].isdigit() else 5
+    if monto is None or monto<20 or pers<1 or pers>20 or monto//pers<1:
+        await m.reply_text("Usa: /lluvia 500 5 (500 monedas para las primeras 5 personas; máximo 20 personas)"); return
+    if not libre and monto>r["m"]:
+        await m.reply_text(f"No tienes tanto en la billetera ({fm(r['m'])} {MONEDA}). El premio sale de tu bolsillo 😉"); return
+    share=monto//pers
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("🌧️ Recoger monedas",callback_data="ll:go")]])
+    sent=await m.reply_text(f"🌧️ ¡LLUVIA DE MONEDAS de {r['n']}!\nSe reparten {fm(share)} {MONEDA} a las primeras {pers} personas que toquen el botón 👇",reply_markup=kb)
+    lluvias[(sent.chat_id,sent.message_id)]={"cre":u.id,"cn":r["n"],"share":share,"max":pers,"got":[],"libre":libre,"t":time.time()}
+    if context.job_queue: context.job_queue.run_once(_cerrar_lluvia,300,data=(sent.chat_id,sent.message_id))
+
+async def lluvia_callback(update,context):
+    q=update.callback_query; u=q.from_user
+    key=(q.message.chat_id,q.message.message_id); d=lluvias.get(key)
+    if not d: await q.answer("Esta lluvia ya terminó 🌤️",show_alert=True); return
+    if u.id==d["cre"]: await q.answer("No puedes recoger tu propia lluvia 😅",show_alert=True); return
+    if u.id in d["got"]: await q.answer("Ya recogiste la tuya 😉",show_alert=True); return
+    if not d["libre"]:
+        c=economia.get(d["cre"])
+        if not c or c["m"]<d["share"]:
+            lluvias.pop(key,None); await q.answer("Se acabaron los fondos 😢",show_alert=True)
+            await _editar(q,f"🌧️ La lluvia de {d['cn']} terminó (sin fondos). Recogieron {len(d['got'])}."); return
+        c["m"]-=d["share"]; ecoguardar(d["cre"])
+    r=eco(u); r["m"]+=d["share"]; d["got"].append(u.id); ecoguardar(u.id)
+    await q.answer(f"¡Recogiste {fm(d['share'])} {MONEDA}!",show_alert=True)
+    if len(d["got"])>=d["max"]:
+        lluvias.pop(key,None)
+        nombres=", ".join((economia.get(x,{}).get("n") or "?") for x in d["got"])
+        await _editar(q,f"🌧️ ¡La lluvia de {d['cn']} terminó!\nRecogieron {fm(d['share'])} {MONEDA} cada uno: {nombres}")
+
+async def _cerrar_lluvia(context):
+    key=context.job.data; d=lluvias.pop(key,None)
+    if not d: return
+    try: await context.bot.edit_message_text(chat_id=key[0],message_id=key[1],
+                                             text=f"🌧️ La lluvia de {d['cn']} terminó. Recogieron {len(d['got'])} de {d['max']}.")
+    except Exception: pass
+
+# ---------- /sorteo (solo admins del grupo; el premio sale de su billetera) ----------
+def programar_sorteo(jq,cid,seg):
+    if jq: jq.run_once(_fin_sorteo,when=max(5,seg),data=cid,name=f"sorteo{cid}")
+
+async def sorteo_cmd(update,context):
+    m=update.message; u=update.effective_user
+    if not en_grupo(update): await m.reply_text("Los sorteos son para grupos 👥"); return
+    if not await es_admin_grupo(update,context):
+        await m.reply_text("Solo los administradores del grupo pueden hacer un sorteo 🔒"); return
+    cid=update.effective_chat.id; cfg=cfg_g(cid)
+    if cfg.get("sorteo"): await m.reply_text("Ya hay un sorteo activo en este grupo 🎟️"); return
+    r=eco(u); libre=es_admin(update); args=context.args or []
+    premio=_num(args[0] if args else "",r["m"])
+    minutos=int(args[1]) if len(args)>1 and args[1].isdigit() else 10
+    if premio is None or premio<10 or minutos<1 or minutos>1440:
+        await m.reply_text("Usa: /sorteo 500 10 (500 monedas de premio, termina en 10 minutos; máximo 1440)"); return
+    if not libre and premio>r["m"]:
+        await m.reply_text(f"No tienes tanto en la billetera ({fm(r['m'])} {MONEDA}). El premio sale de tu bolsillo 😉"); return
+    if not libre: r["m"]-=premio; ecoguardar(u.id)
+    cfg["sorteo"]={"mid":0,"premio":premio,"fin":time.time()+minutos*60,"por":u.id,"pn":r["n"],"libre":libre,"part":[]}   # se registra antes de enviar
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("🎟️ Participar",callback_data="so:go")]])
+    try: sent=await m.reply_text(f"🎟️ ¡SORTEO de {r['n']}!\nPremio: {fm(premio)} {MONEDA}\nTermina en {minutos} min. Toca el botón para participar 👇",reply_markup=kb)
+    except Exception:
+        cfg.pop("sorteo",None)
+        if not libre: r["m"]+=premio; ecoguardar(u.id)
+        return
+    cfg["sorteo"]["mid"]=sent.message_id; persistir("grupos",cid)
+    programar_sorteo(context.job_queue,cid,minutos*60)
+
+async def sorteo_callback(update,context):
+    q=update.callback_query; u=q.from_user; cid=q.message.chat_id
+    s=grupos.get(cid,{}).get("sorteo")
+    if not s or s["mid"]!=q.message.message_id:
+        await q.answer("Este sorteo ya terminó 🎟️",show_alert=True); return
+    if u.id==s["por"]: await q.answer("No puedes participar en tu propio sorteo 😅",show_alert=True); return
+    if u.id in s["part"]: await q.answer("Ya estás participando ✅",show_alert=True); return
+    s["part"].append(u.id); eco(u); ecoguardar(u.id); persistir("grupos",cid)
+    await q.answer(f"¡Estás dentro! Participantes: {len(s['part'])} 🎟️",show_alert=True)
+
+async def _fin_sorteo(context):
+    cid=context.job.data
+    s=grupos.get(cid,{}).pop("sorteo",None)
+    if not s: return
+    persistir("grupos",cid)
+    premio=s["premio"]; gid=None; nombre=""
+    if not s["part"]:
+        if not s["libre"]:
+            c=economia.get(s["por"])
+            if c: c["m"]+=premio; ecoguardar(s["por"])
+        txt="🎟️ Sorteo terminado: nadie participó"+(" (se devolvió el premio)." if not s["libre"] else ".")
+    else:
+        gid=random.choice(s["part"]); w=eco_id(gid); w["m"]+=premio; ecoguardar(gid)
+        nombre=w.get("n") or "alguien"
+        txt=f"🎉 ¡Sorteo terminado! Ganó {nombre} y se lleva {fm(premio)} {MONEDA}"
+    try: await context.bot.edit_message_text(chat_id=cid,message_id=s["mid"],text=txt)
+    except Exception: pass
+    if gid is not None:
+        try: await context.bot.send_message(cid,f'🏆 Felicidades <a href="tg://user?id={gid}">{esc(nombre)}</a>, ganaste {fm(premio)} {MONEDA}',parse_mode="HTML")
+        except Exception: pass
+
+# ---------- monedas por chatear (opcional por grupo) ----------
+async def ecochat_cmd(update,context):
+    m=update.message
+    if not await _solo_admin_grupo(update,context): return
+    cid=update.effective_chat.id; cfg=cfg_g(cid)
+    o=parse_onoff(context.args[0]) if context.args else None
+    if o is None:
+        await m.reply_text(f"💬 Monedas por chatear: {'activadas ✅' if cfg.get('eco_chat') else 'desactivadas ❌'}\n"
+                           "Dan de 1 a 3 monedas por mensaje (máx. 30 por hora, solo a quien ya tiene cuenta).\nUsa: /ecochat on · /ecochat off"); return
+    cfg["eco_chat"]=o; persistir("grupos",cid)
+    await m.reply_text("Monedas por chatear activadas ✅" if o else "Monedas por chatear desactivadas ❌")
+
+async def eco_chat_handler(update,context):
+    m=update.message; u=update.effective_user
+    if not m or not u or u.is_bot or not en_grupo(update): return
+    if not grupos.get(update.effective_chat.id,{}).get("eco_chat"): return
+    if len(m.text or "")<5: return
+    r=economia.get(u.id)
+    if r is None: return   # solo gana quien ya usó la economía
+    if espera(r,"chat",60): return
+    h=int(time.time()//3600); ch=r["st"].get("ch")
+    if not ch or ch[0]!=h: ch=[h,0]
+    if ch[1]>=30: return
+    g=random.randint(1,3); ch[1]+=g; r["st"]["ch"]=ch
+    dar(r,g,1,boost=False); ecoguardar(u.id)
+
+# ---------- finanzas reales (cálculos y precios, sin dinero de verdad) ----------
+def _f(t):
+    t=(t or "").strip().lower().replace("s/","").replace("$","").replace("%","").replace(" ","")
+    if "," in t and "." in t: t=t.replace(",","")
+    elif "," in t: t=t.replace(",",".")
+    try: return float(t)
+    except ValueError: return None
+def m2(x): return f"{x:,.2f}"
+
+CRIPTOS={"btc":"bitcoin","eth":"ethereum","sol":"solana","bnb":"binancecoin","xrp":"ripple","doge":"dogecoin",
+         "ada":"cardano","usdt":"tether","ltc":"litecoin","trx":"tron","ton":"the-open-network"}
+def _cripto_precios(ids):
+    r=requests.get("https://api.coingecko.com/api/v3/simple/price",
+                   params={"ids":",".join(ids),"vs_currencies":"usd,pen","include_24hr_change":"true"},
+                   headers={"User-Agent":"TelegramBot/1.0"},timeout=15)
+    r.raise_for_status(); return r.json()
+async def cripto_cmd(update,context):
+    m=update.message; args=[a.lower() for a in (context.args or [])][:5]
+    ids=[CRIPTOS.get(a,a) for a in args] or ["bitcoin","ethereum","solana"]
+    try: j=await asyncio.to_thread(_cripto_precios,ids)
+    except Exception:
+        await m.reply_text("No pude traer los precios ahora 😕 (uso un servicio gratis, CoinGecko, que a veces limita las consultas). Intenta en un minuto."); return
+    lineas=[]
+    for i in ids:
+        d=j.get(i)
+        if not d or d.get("usd") is None:
+            lineas.append(f"• {i}: no la encontré (prueba btc, eth, sol, bnb, xrp, doge...)"); continue
+        ch=d.get("usd_24h_change")
+        lineas.append(f"• {i.capitalize()}: ${m2(d['usd'])}"+(f" · S/ {m2(d['pen'])}" if d.get("pen") else "")
+                      +(f" · 24h: {ch:+.1f}% {'📈' if ch>=0 else '📉'}" if ch is not None else ""))
+    await m.reply_text("💹 Precios (referenciales)\n\n"+"\n".join(lineas)+"\n\nEj: /cripto btc eth")
+
+async def igv_cmd(update,context):
+    m=update.message; args=context.args or []
+    nums=[a for a in args if _f(a) is not None]; v=_f(nums[0]) if nums else None
+    if v is None or v<0:
+        await m.reply_text("Usa: /igv 100 (le suma el 18%)\nO: /igv 118 incluido (separa el IGV del total)"); return
+    if any(a.lower() in ("incluido","con","total") for a in args): base=v/1.18; igv=v-base; tot=v
+    else: base=v; igv=v*0.18; tot=v+igv
+    await m.reply_text(f"🧾 IGV (18%)\nBase: S/ {m2(base)}\nIGV: S/ {m2(igv)}\nTotal: S/ {m2(tot)}")
+
+async def interes_cmd(update,context):
+    m=update.message; args=context.args or []
+    nums=[_f(a) for a in args if _f(a) is not None]
+    if len(nums)<3 or nums[0]<=0 or nums[1]<0 or nums[1]>1000 or nums[2]<=0 or nums[2]>100:
+        await m.reply_text("Usa: /interes capital tasa% años [mensual]\nEj: /interes 1000 5 3 (5% anual por 3 años)\nEj: /interes 1000 5 3 mensual (capitalización mensual)"); return
+    cap,tasa,anios=nums[:3]; n=12 if any(a.lower().startswith("mens") for a in args) else 1
+    final=cap*(1+tasa/100/n)**(n*anios)
+    await m.reply_text(f"📈 Interés compuesto ({'mensual' if n==12 else 'anual'})\nCapital: S/ {m2(cap)}\nTasa: {tasa}% anual · {anios:g} años\nMonto final: S/ {m2(final)}\nGanancia: S/ {m2(final-cap)}")
+
+async def cuotas_cmd(update,context):
+    m=update.message
+    nums=[_f(a) for a in (context.args or []) if _f(a) is not None]
+    if len(nums)<3 or nums[0]<=0 or nums[1]<0 or nums[1]>1000 or not (1<=nums[2]<=600):
+        await m.reply_text("Usa: /cuotas monto TEA% meses\nEj: /cuotas 5000 30 12 (préstamo de 5000 al 30% anual en 12 meses)"); return
+    monto,tea,meses=nums[0],nums[1],int(nums[2])
+    i=(1+tea/100)**(1/12)-1
+    cuota=monto/meses if i==0 else monto*i/(1-(1+i)**-meses)
+    tot=cuota*meses
+    await m.reply_text(f"🏦 Préstamo (referencial)\nMonto: S/ {m2(monto)}\nTEA: {tea}% · {meses} meses\nCuota mensual: S/ {m2(cuota)}\nTotal a pagar: S/ {m2(tot)}\nIntereses: S/ {m2(tot-monto)}\n\nℹ️ No incluye seguros ni comisiones (la TCEA real puede ser mayor).")
+
+async def propina_cmd(update,context):
+    m=update.message; nums=[_f(a) for a in (context.args or []) if _f(a) is not None]
+    if not nums or nums[0]<0: await m.reply_text("Usa: /propina 120 (10% por defecto) o /propina 120 15"); return
+    p=nums[1] if len(nums)>1 else 10; prop=nums[0]*p/100
+    await m.reply_text(f"🍽️ Propina {p:g}%\nCuenta: S/ {m2(nums[0])}\nPropina: S/ {m2(prop)}\nTotal: S/ {m2(nums[0]+prop)}")
+
+async def dividir_cmd(update,context):
+    m=update.message; nums=[_f(a) for a in (context.args or []) if _f(a) is not None]
+    if len(nums)<2 or nums[0]<0 or not (1<=nums[1]<=1000):
+        await m.reply_text("Usa: /dividir total personas [propina%]\nEj: /dividir 250 5 10"); return
+    p=nums[2] if len(nums)>2 else 0; personas=int(nums[1]); tot=nums[0]*(1+p/100)
+    await m.reply_text(f"🧮 Dividir la cuenta\nCuenta: S/ {m2(nums[0])}"+(f" + propina {p:g}%" if p else "")+f"\nTotal: S/ {m2(tot)}\nEntre {personas} personas: S/ {m2(tot/personas)} cada una")
+
+# ---------- /economia (ayuda) ----------
+async def economia_cmd(update,context):
+    await update.message.reply_text(
+        "💰 ECONOMÍA (monedas virtuales 🪙, sin valor real)\n\n"
+        "🏁 Básico: /saldo · /diario · /trabajar · /minar · /pescar · /cazar\n"
+        "🏦 Banco: /depositar · /retirar (te protege de robos y da 0,5% diario)\n"
+        "🤝 Social: /transferir · /top · /top global · /robar · /duelo\n"
+        "🎰 Juegos: /apostar · /dado · /ruleta · /tragamonedas · /blackjack\n"
+        "🛒 Tienda: /tienda · /comprar · /inventario · /usar x2\n"
+        "📈 Progreso: /nivel · /logros · /misiones\n"
+        "👥 Grupos (admins): /lluvia · /sorteo · /ecochat on|off\n"
+        "💹 Finanzas: /cripto · /igv · /interes · /cuotas · /propina · /dividir\n"
+        "🔒 Admin del bot: /darmonedas · /quitarmonedas · /reiniciareco\n\n"
+        "Puedes escribir cantidades como 100, 2k o 'todo'. Los juegos son de azar y la casa tiene ventaja: juega sin pasarte 😉")
+# ---------- ADMIN: STATS, BROADCAST, BACKUP ----------
+def es_admin(update): return bool(ADMIN_ID) and update.effective_user.id==ADMIN_ID
+async def id_cmd(update,context):
+    await update.message.reply_text(f"Tu ID: {update.effective_user.id}\nChat ID: {update.effective_chat.id}\n(Pon tu ID en Render como ADMIN_ID para usar /stats, /broadcast y /backup)")
+async def stats_cmd(update,context):
+    if not es_admin(update):
+        await update.message.reply_text("Solo el admin 🔒 (usa /id y configura ADMIN_ID en Render)"); return
+    up=int(time.time()-INICIO); msgs=sum(u.get("msgs",0) for u in usuarios.values())
+    hoy=datetime.now(LIMA).strftime("%Y-%m-%d")
+    usos_hoy=sum(r[1] for r in uso_diario.values() if r[0]==hoy)
+    n_notas=sum(len(v) for v in notas.values())
+    n_pend=sum(len(c.get("pend") or {}) for c in grupos.values())
+    if USA_KV:
+        faltan=[n for n in NOMBRES_ESTADO if n not in _kv_ok]
+        mem=("Upstash ✅" if not faltan else f"Upstash ⚠️ no pude leer: {', '.join(faltan)} (reintento solo; mientras tanto no escribo encima)")
+    else:
+        mem="archivo local ⚠️ (se borra al reiniciar)"
+    await update.message.reply_text(
+        f"📊 Estadísticas\nUsuarios: {len(usuarios)}\nMensajes: {msgs}\nEn línea hace: {up//3600}h {(up%3600)//60}m\n"
+        f"Usos de IA hoy: {usos_hoy} (límite por usuario: {LIMITE_DIARIO if LIMITE_DIARIO>0 else 'sin límite'})\n"
+        f"Búsquedas web hoy: {_compound['n']}\nRecordatorios activos: {len(recordatorios)}\nNotas guardadas: {n_notas}\n"
+        f"Economía: {len(economia)} cuentas · {fm(sum(tot_eco(r) for r in economia.values()))} {MONEDA} en circulación\n"
+        f"Grupos con configuración: {len([k for k in grupos if k!=0])} · activos desde el reinicio: {len(msgs_grupo)}\n"
+        f"Verificaciones pendientes: {n_pend}\n"
+        f"Tareas pesadas en curso: {len(_ocupados)} (máx. {MAX_PESADOS} a la vez)\n"
+        f"ffmpeg (audios, videos y TikTok): {'✅' if _ffmpeg_exe() else '❌ falta imageio-ffmpeg'}\n"
+        f"PDFs escaneados (pymupdf): {'✅' if fitz else '❌ falta pymupdf'}\n"
+        f"Modelos descartados: {', '.join(_muertos) or 'ninguno'}\n"
+        f"Memoria permanente: {mem} · cambios por guardar: {len(_sucio)}")
+async def broadcast_cmd(update,context):
+    if not es_admin(update):
+        await update.message.reply_text("Solo el admin 🔒"); return
+    texto=" ".join(context.args).strip()
+    if not texto: await update.message.reply_text("Usa: /broadcast mensaje para todos"); return
+    ok=fail=0
+    for uid in list(usuarios):
+        try: await context.bot.send_message(uid,f"📢 {texto}"); ok+=1
+        except Exception: fail+=1
+        await asyncio.sleep(0.06)
+    await update.message.reply_text(f"Enviado a {ok} usuarios (fallaron {fail}).")
+
+def _armar_backup():
+    """Backup para el admin: NO incluye las conversaciones con la IA (privacidad)."""
+    data={"fecha":ahora()}
+    for n in NOMBRES_ESTADO:
+        if n!="memorias": data[n]=_serializar_todo(n)
+    buf=BytesIO(json.dumps(data,ensure_ascii=False,indent=1).encode("utf-8"))
+    buf.name=f"backup_{datetime.now(LIMA).strftime('%Y%m%d_%H%M')}.json"
+    return buf
+async def backup_cmd(update,context):
+    if not es_admin(update):
+        await update.message.reply_text("Solo el admin 🔒"); return
+    if update.effective_chat.type!="private":
+        await update.message.reply_text("Pídeme el backup en mi chat privado 🔒 (contiene datos de usuarios)"); return
+    try:
+        await update.message.reply_document(document=_armar_backup(),caption=f"💾 Backup · {len(usuarios)} usuarios (sin conversaciones)")
+    except Exception as e: await update.message.reply_text(f"No pude armar el backup 😕 {str(e)[:150]}")
+async def backup_auto(context):
+    if not ADMIN_ID: return
+    try: await context.bot.send_document(ADMIN_ID,document=_armar_backup(),caption="💾 Backup automático diario (sin conversaciones)")
+    except Exception as e: logging.warning(f"Backup automático falló: {type(e).__name__}")
+
+_marca_usr={}
+async def registrar_usuario(update,context):
+    try:
+        u=update.effective_user
+        if not u or u.is_bot: return
+        m=update.message
+        # guarda en memoria RAM los últimos mensajes del grupo (para /resumen)
+        if en_grupo(update) and m and m.text and not m.text.startswith("/"):
+            guardar_msg_grupo(update)
+        # en grupos solo cuenta a quien le habla al bot (mención, reply o comando)
+        if en_grupo(update) and not me_hablan(update,context):
+            if not (m and (m.text or "").startswith("/")): return
+        nuevo=u.id not in usuarios
+        d=usuarios.setdefault(u.id,{"nombre":u.first_name or "","msgs":0,"primera":int(time.time())})
+        d["nombre"]=u.first_name or d.get("nombre","")
+        if m: d["msgs"]=d.get("msgs",0)+1
+        if nuevo or time.time()-_marca_usr.get(u.id,0)>300:   # no se guarda en cada mensaje (ahorra comandos de Upstash)
+            _marca_usr[u.id]=time.time(); marcar("usuarios",u.id)
+    except Exception: pass
+
+# ---------- PRIVACIDAD: /privacidad Y /borrardatos ----------
+async def privacidad_cmd(update,context):
+    await update.message.reply_text(
+        "🔒 PRIVACIDAD\n\n"
+        "Lo que guardo de ti:\n"
+        "• Tus últimos 20 mensajes con la IA (separados: el chat privado y cada grupo van aparte)\n"
+        "• Tu perfil (datos que me cuentas), tu modo, tus notas y tus recordatorios\n"
+        "• Tu cuenta de economía (monedas, nivel, inventario, logros)\n"
+        "• Tu nombre, tu @usuario y cuántos mensajes me escribes\n\n"
+        "Lo que NO se guarda:\n"
+        "• Fotos, audios, videos y archivos: se procesan y solo quedan unos minutos en memoria\n"
+        "• La charla de los grupos para /resumen: solo está en la memoria de mi servidor (los últimos 120 mensajes) y se pierde al reiniciar\n"
+        "• Los registros del servidor no incluyen lo que escribes\n\n"
+        "Ojo: para responderte envío tus mensajes a Groq (el servicio de IA gratis que uso).\n"
+        "El backup que recibe el admin NO incluye tus conversaciones.\n\n"
+        "Para borrar todo lo tuyo: /borrardatos (en mi chat privado)")
+
+async def borrardatos_cmd(update,context):
+    if en_grupo(update):
+        await update.message.reply_text("Por privacidad, usa /borrardatos en mi chat privado 🔒"); return
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ Sí, borrar mis datos",callback_data="bd:si"),
+                              InlineKeyboardButton("Cancelar",callback_data="bd:no")]])
+    await update.message.reply_text("Esto borra TODO lo que guardé de ti: tus chats con la IA (también los de grupos), tu perfil, tus notas, tu modo, tus recordatorios y tu cuenta de economía (perderías tus monedas).\n¿Seguro?",reply_markup=kb)
+
+async def borrar_datos_usuario(uid,context):
+    claves=[k for k in list(user_memories) if k==uid or (isinstance(k,str) and k.endswith(f":{uid}"))]
+    for k in claves:
+        for d in (user_memories,resumen_doc,ultimo_doc,ultima_foto): d.pop(k,None)
+    for d in (perfiles,notas,usuarios,economia,ultimo_img,tt_ult,bj_juegos): d.pop(uid,None)
+    quitados=[r for r in recordatorios if r["uid"]==uid]
+    for r in quitados:
+        recordatorios.remove(r)
+        if context.job_queue:
+            for j in context.job_queue.get_jobs_by_name(f"rec{r['id']}"): j.schedule_removal()
+    for n,k in list(_sucio):
+        if (n=="memorias" and k in claves) or (n in ("perfiles","notas","usuarios","economia") and k==uid): _sucio.discard((n,k))
+    if USA_KV:
+        items=[("memorias",k) for k in claves]+[("perfiles",uid),("notas",uid),("usuarios",uid),("economia",uid)]
+        await asyncio.to_thread(_borrar_kv,items)
+    else:
+        for n in ("memorias","perfiles","notas","usuarios","economia"): persistir(n)
+    if quitados: persistir("recordatorios")
+    return f"{len(claves)} conversaciones, perfil, notas, economía y {len(quitados)} recordatorios"
+
+async def borrardatos_callback(update,context):
+    q=update.callback_query; uid=q.from_user.id
+    if q.data=="bd:no":
+        await q.answer("Cancelado")
+        try: await q.edit_message_text("Cancelado ✅ no borré nada.")
+        except Exception: pass
+        return
+    await q.answer("Borrando…")
+    try:
+        res=await borrar_datos_usuario(uid,context)
+        txt=f"Listo 🧹 borré tus datos ({res})."
+    except Exception as e:
+        txt=f"No pude borrar todo 😕 {str(e)[:120]}"
+    try: await q.edit_message_text(txt)
+    except Exception: pass
+
+# ---------- COMANDOS BÁSICOS ----------
+async def start(update:Update, context:ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Qué onda {update.effective_user.first_name} bro! 🚀 V28\nSoy tu IA gratis: imágenes, fotos, archivos, audios, videos, TikToks, stickers, notas, clima, dólar, recordatorios, economía y juegos 🔥🇵🇪\nUsa /ayuda para ver todo")
+async def ayuda_cmd(update,context):
+    await update.message.reply_text(
+        "🤖 COMANDOS (también puedes pedirlos hablando normal)\n\n"
+        "🎨 /imagen un gato → o 'dibuja un gato' (agrega 'vertical'/'horizontal'; botones de estilo y sticker)\n"
+        "🔎 /buscar tema → o 'busca tema'\n"
+        "🧠 /pensar pregunta → razonamiento profundo\n"
+        "✍️ /redactar correo formal pidiendo... → textos listos para copiar\n"
+        "📝 /nota texto · /notas · /borrarnota ID → tus apuntes (también 'anota que...')\n"
+        "🌐 /trad en hola → traduce (o responde a un mensaje con /trad)\n"
+        "📰 /resumir link → resume una página\n"
+        "🌤️ /clima Lima\n"
+        "💱 /dolar · /dolar 100 · /dolar 50 eur\n"
+        "🔲 /qr texto\n"
+        "🎤 /voz texto → nota de voz\n"
+        "⏰ /recordar 10m sacar la ropa · /recordatorios · /cancelar ID\n"
+        "🎬 /tt link → TikTok sin marca (links normales, cortos y de TikTok Lite; o pega el link / el texto de compartir solo; con botón 🎵 Solo audio)\n"
+        "🎵 /mp3 link → audio de un TikTok\n"
+        "🎭 /s → responde a una foto con /s y la vuelvo sticker\n"
+        "🎚️ /modo → normal, serio, profesor, programador, bromista\n"
+        "👤 /perfil · /olvida → lo que sé de ti\n"
+        "🧹 /clear → borra la memoria del chat\n"
+        "💰 /economia → monedas, juegos, tienda, ranking y finanzas (/cripto /igv /cuotas...)\n"
+        "🔒 /privacidad → qué guardo · /borrardatos → borra todo lo tuyo\n"
+        "🆔 /id\n\n"
+        "🖼️ Fotos: mándame una (qué tiene, qué significa, qué dice, recrea esto en estilo anime)\n"
+        "📄 Archivos: PDF (también escaneados), Word, Excel, TXT, CSV, código (pregunta en el pie o después)\n"
+        "🎧 Audios y 🎬 videos: mándamelos y los transcribo y analizo (hasta 20 MB); luego pregúntame ('qué dice el audio', 'transcribe el audio')\n"
+        "🎤 Si me hablas con voz, te respondo con voz\n\n"
+        "👥 EN GRUPOS: los comandos funcionan normal; para hablar con la IA mencióname con @ y tu pregunta (o respóndele a un mensaje mío).\n"
+        "   /resumen → resume la charla del grupo · /reglas → ver las reglas\n"
+        "   ⚙️ Admins del grupo: /panel (menú con botones) · /bienvenida · /mensajebienvenida · /fotobienvenida · /reglas · /botonbienvenida · /verificacion · /antispam · /despedida · /lluvia · /sorteo · /ecochat")
+async def clear_cmd(update,context):
+    ck=ckey(update)
+    user_memories[ck]=[]; guardar_memorias(ck)
+    await update.message.reply_text("Memoria limpia 🧹 ahora prueba: Que hay de bueno con keiko la presidenta de peru")
+async def imagen_cmd(update,context):
+    if not context.args: await update.message.reply_text("Usa: /imagen un gato"); return
+    if not await consumir(update): return
+    await crear_imagen(update," ".join(context.args))
+async def buscar_cmd(update,context):
+    if not context.args: await update.message.reply_text("Usa: /buscar keiko fujimori"); return
+    q=" ".join(context.args)
+    res=await asyncio.to_thread(buscar_en_internet,q)
+    await update.message.reply_text(f"Encontré:\n{res}" if res else "No pude conectar a internet ahora bro 😕 intenta de nuevo en un rato.")
+
+# ---------- CHAT PRINCIPAL ----------
+_ultimo_msg={}
+async def ia_reply(update:Update, context:ContextTypes.DEFAULT_TYPE, texto_override=None):
+    if not update.message: return   # ignora mensajes editados y otros tipos de actualización
+    user_id=update.effective_user.id
+    ck=ckey(update)
+    grupo=en_grupo(update)
+    # en grupos solo responde si lo mencionan (o le responden a un mensaje suyo)
+    if not me_hablan(update,context): return
+    texto_original=texto_override or update.message.text or ""
+    if texto_override is None: texto_original=limpiar_mencion(texto_original,context)
+    if not texto_original.strip():
+        if texto_override is None and grupo and (update.message.text or "").strip():
+            await update.message.reply_text("Dime bro, ¿en qué te ayudo? 😎")
+        return
+    if texto_override is None:
+        if time.time()-_ultimo_msg.get(user_id,0)<COOLDOWN: return
+        _ultimo_msg[user_id]=time.time()
+    low_o=texto_original.lower()
+    # si me hablas con voz, respondo con voz
+    quiere_audio=any(x in low_o for x in ["en audio","nota de voz","audio","con voz","hablame"]) or texto_override is not None
+
+    # link de TikTok pegado solo (con o sin el texto de compartir), o "descarga + link"
+    link_tt=sacar_link_tt(texto_original)
+    if link_tt and (solo_link_tt(texto_original) or any(k in low_o for k in ["descarga","baja","bájame","bajame","sin marca"])):
+        await descargar_tiktok(update,context,link_tt); return
+
+    # "recuérdame en 10 minutos ..."
+    mrec=RE_RECUERDAME.search(texto_original)
+    if mrec:
+        mult={"s":1,"m":60,"h":3600,"d":86400}[mrec.group(2).lower()[0]]
+        await crear_recordatorio(update,context,int(mrec.group(1))*mult,mrec.group(3).strip()); return
+
+    # notas por lenguaje natural: "anota que mañana..." / "mis notas"
+    mnota=RE_NOTA.match(texto_original.strip())
+    if mnota:
+        nid=guardar_nota(user_id,mnota.group(1))
+        await update.message.reply_text(f"📝 Nota #{nid} guardada. Mira todas con /notas" if nid else f"Ya tienes {MAX_NOTAS} notas 📝 borra alguna con /borrarnota ID")
+        return
+    if low_o.strip(" ?!.") in ("mis notas","ver mis notas","muestra mis notas","mostrar mis notas"):
+        await mostrar_notas(update); return
+
+    if any(x in low_o for x in CLAVES_CLEAR):
+        await clear_cmd(update,context); return
+
+    # límite diario de usos de IA (la voz ya se contó en voz_handler)
+    if texto_override is None and not await consumir(update): return
+
+    # "resume este link"
+    url_gen=URL_RE.search(texto_original)
+    if url_gen and not link_tt and any(k in low_o for k in ["resume","resumen","resumir","de qué trata","de que trata"]):
+        await resumir_url(update,limpiar_url(url_gen.group(0))); return
+
+    rm=update.message.reply_to_message
+    if rm and rm.photo and rm.from_user and not rm.from_user.is_bot and not any(v in low_o for v in VERBOS_CREAR):
+        try: await procesar_foto(update,context,rm.photo[-1].file_id,texto_original)
+        except Exception as e: await update.message.reply_text(msg_error(e))
+        return
+    if es_pregunta_foto(low_o,ck):
+        try: await procesar_foto(update,context,ultima_foto[ck][0],texto_original)
+        except Exception as e: await update.message.reply_text(msg_error(e))
+        return
+    if es_pregunta_doc(low_o,ck):
+        try: await responder_sobre_doc(update,ck,texto_original)
+        except Exception as e: await update.message.reply_text(msg_error(e))
+        return
+
+    texto_corregido=await asyncio.to_thread(corregir_y_entender,texto_original)
+    if es_pedido_imagen(texto_corregido):
+        await crear_imagen(update,texto_corregido); return
+    t_low=texto_corregido.lower()
+    busco=any(x in t_low for x in CLAVES_BUSQUEDA)
+    contexto_busqueda=""
+    if busco:
+        contexto_busqueda=await asyncio.to_thread(buscar_en_internet,texto_corregido)
+    es_tradu=any(x in t_low for x in ["traduce","translate"])
+    complejo=es_complejo(texto_corregido) and not es_tradu
+    async with lock_de(ck):   # un mensaje a la vez por persona: así la memoria del chat no se mezcla
+        try:
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id,action="typing")
+            memoria=get_memory(ck)
+            memoria.append({"role":"user","content":texto_corregido})
+            if len(memoria)>14: memoria=memoria[-14:]
+            user_memories[ck]=memoria
+            if es_tradu:
+                system_prompt="Eres traductor PRO. Traduce directo."
+                temp=0.3
+            else:
+                system_prompt=construir_system(user_id,grupo)
+                temp=0.5 if complejo else 0.8
+            msgs=list(memoria)
+            if busco and contexto_busqueda:
+                msgs[-1]={"role":"user","content":f"INFO INTERNET sobre '{texto_corregido}':\n{contexto_busqueda}\n\nPregunta: {texto_corregido}"}
+            elif busco:
+                msgs[-1]={"role":"user","content":f"(No pude conectar a internet ahora; responde con lo que sabes y avisa brevemente que puede estar desactualizado)\nPregunta: {texto_corregido}"}
+            respuesta=await allm([{"role":"system","content":system_prompt},*msgs],
+                                 max_tokens=2000 if complejo else 1500,temperature=temp,
+                                 modelos=MODELOS_LISTOS if complejo else MODELOS_RAPIDOS,
+                                 esfuerzo="medium" if complejo else "low")
+            memoria.append({"role":"assistant","content":respuesta[:1500]})
+            user_memories[ck]=memoria; guardar_memorias(ck)
+            await enviar_largo(update,respuesta)
+            if quiere_audio: await enviar_audio(update,respuesta)
+            if APRENDER_PERFIL and not es_tradu and RE_PERFIL.search(texto_corregido):
+                t=asyncio.create_task(aprender_perfil(user_id,texto_corregido)); _tareas.add(t); t.add_done_callback(_tareas.discard)
+        except Exception as e:
+            logging.error(f"Error en el chat IA: {type(e).__name__}")
+            await update.message.reply_text(msg_error(e))
+            if "429" not in str(e) and "rate" not in str(e).lower():
+                await alertar_admin("Error en el chat IA",f"{type(e).__name__}: {str(e)[:300]}")
+
+async def voz_handler(update,context):
+    if not update.message: return
+    if not me_hablan(update,context): return   # en grupos: solo si es respuesta al bot
+    if not await consumir(update): return
+    try:
+        await update.message.reply_text("Escuchando 🎧...")
+        vf=await update.message.voice.get_file()
+        buf=BytesIO(); await vf.download_to_memory(buf); buf.seek(0)
+        data=buf.read()
+        transcription=await asyncio.to_thread(lambda: groq_client.audio.transcriptions.create(
+            file=("audio.ogg",data),model="whisper-large-v3",response_format="text"))
+        txt=str(transcription).strip()
+        if not txt: await update.message.reply_text("Audio vacío"); return
+        await update.message.reply_text(f"Entendí: '{txt}'")
+        await ia_reply(update,context,texto_override=txt)
+    except Exception as e: await update.message.reply_text(f"Error voz: {e}")
+
+async def documento_handler(update,context):
+    if not update.message: return
+    if not me_hablan(update,context): return   # en grupos: solo con @mención en el pie o respuesta al bot
+    try:
+        doc=update.message.document
+        nombre=(doc.file_name or "").lower()
+        mime=(doc.mime_type or "")
+        caption=limpiar_mencion(update.message.caption or "",context)
+        if mime.startswith("image/") or nombre.endswith((".jpg",".jpeg",".png",".webp")):
+            if any(k in caption.lower() for k in ["sticker","estiker"]):
+                await hacer_sticker(update.message,context,doc.file_id); return
+            if not await consumir(update): return
+            if es_pedido_imagen(caption): await crear_imagen(update,caption); return
+            await procesar_foto(update,context,doc.file_id,caption,doc.mime_type or "image/jpeg"); return
+        # audios y videos enviados como archivo
+        es_vid=mime.startswith("video/") or nombre.endswith((".mp4",".mov",".mkv",".webm",".avi"))
+        if es_vid or mime.startswith("audio/") or nombre.endswith((".mp3",".m4a",".wav",".ogg",".opus",".aac",".flac")):
+            if not await consumir(update): return
+            await procesar_media(update,context,doc,doc.file_name or "archivo",es_vid,caption,doc.file_size); return
+        if not await consumir(update): return
+        await procesar_archivo(update,context,doc,caption)
+    except Exception as e: await update.message.reply_text(f"Error archivo: {str(e)[:250]}")
+
+async def foto_handler(update,context):
+    if not update.message: return
+    if not me_hablan(update,context): return   # en grupos: solo con @mención en el pie o respuesta al bot
+    try:
+        caption=limpiar_mencion(update.message.caption or "",context)
+        if any(k in caption.lower() for k in ["sticker","estiker"]):
+            await hacer_sticker(update.message,context,update.message.photo[-1].file_id); return
+        if not await consumir(update): return
+        if es_pedido_imagen(caption): await crear_imagen(update,caption); return
+        await procesar_foto(update,context,update.message.photo[-1].file_id,caption)
+    except Exception as e:
+        try:
+            txt=await allm([{"role":"user","content":"No pude ver foto, di que intente de nuevo"}],max_tokens=100)
+            await update.message.reply_text(txt)
+        except: await update.message.reply_text(f"Error foto: {e}")
+
+# ---------- MANTENIMIENTO: GUARDADO EN LOTE Y LIMPIEZA DE MEMORIA ----------
+ult_saludo_ts={}   # (reservado: marcas de tiempo auxiliares; se limpia solo)
+def limpiar_memoria():
+    """Borra de la RAM lo que ya caducó (archivos, fotos, búsquedas, partidas, avisos...)."""
+    t=time.time(); hoy=datetime.now(LIMA).strftime("%Y-%m-%d")
+    for k,v in list(ultimo_doc.items()):
+        if t-v[2]>VENTANA_DOC*2: ultimo_doc.pop(k,None); resumen_doc.pop(k,None)
+    for k,v in list(ultima_foto.items()):
+        if t-v[1]>VENTANA_FOTO*2: ultima_foto.pop(k,None)
+    for k,v in list(ultimo_img.items()):
+        if t-v[4]>3600: ultimo_img.pop(k,None)
+    for k,v in list(_cache_busq.items()):
+        if t-v[0]>600: _cache_busq.pop(k,None)
+    limpiar_tt()
+    for k,v in list(recien.items()):
+        if t-v>3600: recien.pop(k,None)
+    for cid,dq in list(joins.items()):
+        while dq and t-dq[0]>120: dq.popleft()
+        if not dq: joins.pop(cid,None)
+    for dic,ttl in ((expulsados,600),(_aviso_perm,3600),(_aviso_spam,3600),(_alertas,3600),(_aviso_error,3600),
+                    (_ultimo_msg,600),(_marca_usr,3600),(ult_saludo_ts,86400)):
+        for k,v in list(dic.items()):
+            if t-v>ttl: dic.pop(k,None)
+    for k,v in list(uso_diario.items()):
+        if v[0]!=hoy: uso_diario.pop(k,None)
+    for cid,d in list(msgs_grupo.items()):
+        if not d or t-d[-1][0]>86400: msgs_grupo.pop(cid,None)
+    for k,g in list(bj_juegos.items()):
+        if t-g["t"]>600: bj_juegos.pop(k,None)
+    for k,d in list(duelos.items()):
+        if t-d["t"]>180: duelos.pop(k,None)
+    for k,d in list(lluvias.items()):
+        if t-d["t"]>600: lluvias.pop(k,None)
+    if len(_locks_usuario)>500:
+        for k,l in list(_locks_usuario.items()):
+            if not l.locked(): _locks_usuario.pop(k,None)
+
+_tarea_mant=None
+async def _bucle_mantenimiento():
+    ciclos=0
+    while True:
+        await asyncio.sleep(INTERVALO_GUARDADO)
+        try: await flush_async()
+        except Exception as e: logging.warning(f"Guardado falló: {type(e).__name__}")
+        ciclos+=1
+        if ciclos%max(1,600//INTERVALO_GUARDADO)==0:   # cada ~10 minutos
+            try: limpiar_memoria()
+            except Exception as e: logging.warning(f"Limpieza falló: {type(e).__name__}")
+
+# ---------- ARRANQUE ----------
+async def post_init(app):
+    global APP_BOT,_tarea_mant
+    APP_BOT=app.bot
+    _tarea_mant=asyncio.create_task(_bucle_mantenimiento())
+    try:
+        await app.bot.set_my_commands([
+            BotCommand("ayuda","Ver todos los comandos"),BotCommand("economia","Monedas, juegos y tienda"),
+            BotCommand("saldo","Ver mis monedas"),BotCommand("diario","Recompensa diaria"),
+            BotCommand("trabajar","Trabajar y ganar monedas"),BotCommand("apostar","Apostar monedas"),
+            BotCommand("top","Ranking de monedas"),BotCommand("tienda","Tienda de objetos"),
+            BotCommand("cripto","Precio de criptomonedas"),BotCommand("igv","Calculadora de IGV"),
+            BotCommand("imagen","Crear una imagen"),
+            BotCommand("tt","Bajar TikTok sin marca"),BotCommand("mp3","Audio de un TikTok"),
+            BotCommand("s","Crear sticker de una foto"),BotCommand("buscar","Buscar en internet"),
+            BotCommand("pensar","Razonamiento profundo"),BotCommand("redactar","Redactar correos y textos"),
+            BotCommand("nota","Guardar una nota"),BotCommand("notas","Ver mis notas"),
+            BotCommand("borrarnota","Borrar una nota"),BotCommand("trad","Traducir"),
+            BotCommand("resumir","Resumir un link"),BotCommand("resumen","Resumir la charla del grupo"),
+            BotCommand("clima","Clima de una ciudad"),BotCommand("dolar","Tipo de cambio"),
+            BotCommand("qr","Crear código QR"),BotCommand("voz","Texto a nota de voz"),
+            BotCommand("recordar","Crear recordatorio"),BotCommand("recordatorios","Ver recordatorios"),
+            BotCommand("modo","Cambiar personalidad"),BotCommand("perfil","Ver tu perfil"),
+            BotCommand("privacidad","Qué guarda el bot de ti"),BotCommand("borrardatos","Borrar todos mis datos"),
+            BotCommand("reglas","Ver las reglas del grupo"),
+            BotCommand("panel","Panel de bienvenida y seguridad (admins)"),
+            BotCommand("bienvenida","Bienvenida del grupo (admins)"),
+            BotCommand("mensajebienvenida","Personalizar el mensaje de bienvenida"),
+            BotCommand("fotobienvenida","Foto o video de bienvenida"),
+            BotCommand("botonbienvenida","Botones de enlace del saludo"),
+            BotCommand("verificacion","Verificación anti-bots (admins)"),
+            BotCommand("antispam","Anti-spam a recién llegados (admins)"),
+            BotCommand("despedida","Mensaje de despedida (admins)"),
+            BotCommand("lluvia","Lluvia de monedas (admins)"),BotCommand("sorteo","Sorteo con monedas (admins)"),
+            BotCommand("clear","Borrar memoria del chat")])
+    except Exception as e: logging.warning(f"set_my_commands: {type(e).__name__}")
+    if app.job_queue:
+        for r in list(recordatorios):
+            if r["ts"]<time.time()-86400: recordatorios.remove(r); continue
+            programar(app.job_queue,r)
+        for cid_,cfg_ in list(grupos.items()):
+            # retoma las verificaciones que quedaron pendientes si el bot se reinició
+            for uid_s,info in list((cfg_.get("pend") or {}).items()):
+                try: programar_verif(app.job_queue,cid_,int(uid_s),info.get("t",0)-time.time())
+                except Exception: pass
+            # retoma los sorteos activos
+            s=cfg_.get("sorteo")
+            if s: programar_sorteo(app.job_queue,cid_,s.get("fin",0)-time.time())
+        if BACKUP_AUTOMATICO and ADMIN_ID:
+            app.job_queue.run_daily(backup_auto,time=dtime(3,0,tzinfo=LIMA),name="backup_diario")
+async def post_shutdown(app):
+    try: await flush_async()   # guarda lo pendiente antes de apagar
+    except Exception as e: logging.warning(f"Guardado final falló: {type(e).__name__}")
+
+if __name__=="__main__":
+    app=(ApplicationBuilder().token(TOKEN).concurrent_updates(MAX_CONCURRENTES)
+         .post_init(post_init).post_shutdown(post_shutdown).build())
+    app.add_error_handler(error_handler)
+    MSG=filters.UpdateType.MESSAGE   # solo mensajes nuevos (los editados se ignoran, salvo en el anti-spam)
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS,antispam_handler),group=-2)
+    app.add_handler(TypeHandler(Update,registrar_usuario),group=-1)
+    for nombre,fn in [("start",start),("ayuda",ayuda_cmd),("clear",clear_cmd),("imagen",imagen_cmd),("buscar",buscar_cmd),
+                      ("tt",tt_cmd),("mp3",mp3_cmd),("s",s_cmd),("trad",trad_cmd),("resumir",resumir_cmd),
+                      ("clima",clima_cmd),("dolar",dolar_cmd),("qr",qr_cmd),("voz",voz_cmd),("modo",modo_cmd),
+                      ("perfil",perfil_cmd),("olvida",olvida_cmd),("pensar",pensar_cmd),("recordar",recordar_cmd),
+                      ("recordatorios",recordatorios_cmd),("cancelar",cancelar_cmd),("id",id_cmd),
+                      ("stats",stats_cmd),("broadcast",broadcast_cmd),("backup",backup_cmd),
+                      ("nota",nota_cmd),("notas",notas_cmd),("borrarnota",borrarnota_cmd),("redactar",redactar_cmd),
+                      ("resumen",resumen_cmd),("bienvenida",bienvenida_cmd),("fotobienvenida",fotobienvenida_cmd),
+                      ("mensajebienvenida",mensajebienvenida_cmd),("reglas",reglas_cmd),
+                      ("botonbienvenida",botonbienvenida_cmd),("verificacion",verificacion_cmd),
+                      ("antispam",antispam_cmd),("despedida",despedida_cmd),("panel",panel_cmd),
+                      ("privacidad",privacidad_cmd),("borrardatos",borrardatos_cmd),
+                      # --- economía ---
+                      ("economia",economia_cmd),("saldo",saldo_cmd),("diario",diario_cmd),("trabajar",trabajar_cmd),
+                      ("minar",minar_cmd),("pescar",pescar_cmd),("cazar",cazar_cmd),("depositar",depositar_cmd),
+                      ("retirar",retirar_cmd),("transferir",transferir_cmd),("top",top_cmd),("tienda",tienda_cmd),
+                      ("comprar",comprar_cmd),("inventario",inventario_cmd),("usar",usar_cmd),("nivel",nivel_cmd),
+                      ("logros",logros_cmd),("misiones",misiones_cmd),("apostar",apostar_cmd),("dado",dado_cmd),
+                      ("ruleta",ruleta_cmd),("tragamonedas",tragamonedas_cmd),("blackjack",blackjack_cmd),
+                      ("robar",robar_cmd),("duelo",duelo_cmd),("darmonedas",darmonedas_cmd),
+                      ("quitarmonedas",quitarmonedas_cmd),("reiniciareco",reiniciareco_cmd),("lluvia",lluvia_cmd),
+                      ("sorteo",sorteo_cmd),("ecochat",ecochat_cmd),("cripto",cripto_cmd),("igv",igv_cmd),
+                      ("interes",interes_cmd),("cuotas",cuotas_cmd),("propina",propina_cmd),("dividir",dividir_cmd)]:
+        app.add_handler(CommandHandler(nombre,fn,filters=MSG))
+    app.add_handler(CallbackQueryHandler(img_callback,pattern="^img:"))
+    app.add_handler(CallbackQueryHandler(tt_callback,pattern="^tt:"))
+    app.add_handler(CallbackQueryHandler(modo_callback,pattern="^modo:"))
+    app.add_handler(CallbackQueryHandler(bv_callback,pattern="^bv:"))
+    app.add_handler(CallbackQueryHandler(panel_callback,pattern="^pn:"))
+    app.add_handler(CallbackQueryHandler(borrardatos_callback,pattern="^bd:"))
+    app.add_handler(CallbackQueryHandler(tienda_callback,pattern="^tn:"))
+    app.add_handler(CallbackQueryHandler(bj_callback,pattern="^bj:"))
+    app.add_handler(CallbackQueryHandler(duelo_callback,pattern="^du:"))
+    app.add_handler(CallbackQueryHandler(lluvia_callback,pattern="^ll:"))
+    app.add_handler(CallbackQueryHandler(sorteo_callback,pattern="^so:"))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS,bienvenida_handler))
+    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER,despedida_handler))
+    # /s en el pie de una foto: debe ir ANTES de los handlers de foto y documento
+    app.add_handler(MessageHandler(MSG & (filters.PHOTO | filters.Document.IMAGE) & filters.CaptionRegex(r"(?i)^/s(@\w+)?(\s|$)"),s_cmd))
+    app.add_handler(MessageHandler(MSG & filters.VOICE,voz_handler))
+    app.add_handler(MessageHandler(MSG & (filters.AUDIO | filters.VIDEO | filters.VIDEO_NOTE),media_handler))
+    app.add_handler(MessageHandler(MSG & filters.Document.ALL,documento_handler))
+    app.add_handler(MessageHandler(MSG & filters.PHOTO,foto_handler))
+    app.add_handler(MessageHandler(MSG & filters.TEXT & ~filters.COMMAND,ia_reply))
+    # monedas por chatear (corre aparte del chat con la IA)
+    app.add_handler(MessageHandler(MSG & filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,eco_chat_handler),group=1)
+    print("Bot V28 iniciado 🔥")
+    app.run_polling()
 # === FIN DEL ARCHIVO ===
