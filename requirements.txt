@@ -5,6 +5,7 @@ requests>=2.31,<3
 PyPDF2==3.0.1
 pypdf>=4,<7
 gTTS>=2.5,<3
+edge-tts
 ddgs
 tzdata
 python-docx>=1.1,<2
