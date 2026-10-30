@@ -4134,6 +4134,726 @@ async def buscar_cmd(update,context):
         await update.message.reply_text("Usa: /buscar keiko fujimori\nTambién puedes escribirme «busca…» o preguntar por algo actual."); return
     if not await consumir(update): return
     await responder_ia(update,context,q,"buscar")
+# ======================================================================
+# V30: botones en las respuestas de IA, IA con herramientas, moderación, XP de grupo y negocios
+# ======================================================================
+import ast, math, operator as _op, unicodedata
+
+TITULOS.update({"calc":"CALCULADORA","warn":"MODERACIÓN","unwarn":"MODERACIÓN","warns":"MODERACIÓN","warnlimite":"MODERACIÓN",
+                "mute":"MODERACIÓN","unmute":"MODERACIÓN","ban":"MODERACIÓN","unban":"MODERACIÓN","kick":"MODERACIÓN",
+                "filtro":"FILTRO","captcha":"CAPTCHA","actividad":"ACTIVIDAD","rango":"RANGO DEL GRUPO","activos":"MÁS ACTIVOS",
+                "negocios":"NEGOCIOS","cobrar":"INGRESOS PASIVOS","misnegocios":"MIS NEGOCIOS"})
+ECO_CMDS.update({"negocios","cobrar","misnegocios"})
+ANIMADOS.update({"cobrar":"Recaudando ingresos"})
+
+AYUDA_MODULOS["ia"]=("🧠 IA y texto","▸ Habla normal y te respondo con IA (en grupos, mencióname con @)\n▸ Entiendo pedidos como «piénsalo a fondo», «tradúcelo al inglés», «redacta un correo», «resume este link» o «busca…» sin comandos\n▸ Uso solo el clima, el dólar, la calculadora y la búsqueda cuando hacen falta (ej: «¿llueve en Cusco y cuánto son 100 dólares en soles?»)\n▸ Cada respuesta trae botones: 🔁 regenerar · 🔊 voz · 🌐 traducir · ✂️ más corto · 📋 más detalle\n▸ Atajos: /pensar · /trad · /redactar · /resumir · /buscar · /calc · /imagen\n▸ /modo (incluye modo cyber) · /perfil · /olvida · /clear")
+AYUDA_MODULOS["eco"]=("💠 Economía","▸ /saldo · /diario · /trabajar · /minar · /pescar · /cazar · /radar\n▸ Vault: /depositar · /retirar (protege de robos y da 0,5% diario)\n▸ Negocios: /negocios · /cobrar · /misnegocios (ingresos pasivos)\n▸ Social: /transferir · /top · /robar · /duelo\n▸ Mercado: /tienda · /comprar · /inventario · /usar x2\n▸ Progreso: /nivel · /logros · /misiones")
+AYUDA_MODULOS["grupos"]=("👥 Grupos","▸ Admins: /panel (menú con botones) · /bienvenida · /mensajebienvenida · /fotobienvenida\n▸ /reglas · /botonbienvenida · /verificacion · /antispam · /despedida\n▸ /lluvia · /sorteo · /ecochat on|off\n▸ XP del grupo: /actividad on|off (admins) · /rango · /activos\n▸ Todos: /resumen · /reglas")
+AYUDA_MODULOS["mod"]=("🛡️ Moderación","▸ Solo admins del grupo (responde al mensaje de la persona con el comando)\n▸ /warn motivo · /unwarn · /warns · /warnlimite 3\n▸ /mute 30m · /unmute · /ban · /unban · /kick\n▸ /filtro on|off · /filtro add palabra · /filtro del palabra · /filtro lista · /filtro accion borrar|warn\n▸ /captcha on|off [minutos] → los nuevos resuelven una suma\n▸ Necesito ser administrador con permiso de restringir y borrar mensajes")
+
+# ======================================================================
+# 1) CALCULADORA SEGURA Y HERRAMIENTAS DE IA
+# ======================================================================
+_OPS={ast.Add:_op.add,ast.Sub:_op.sub,ast.Mult:_op.mul,ast.Div:_op.truediv,ast.FloorDiv:_op.floordiv,ast.Mod:_op.mod,ast.Pow:_op.pow}
+_FUN={"sqrt":math.sqrt,"abs":abs,"round":round,"sin":math.sin,"cos":math.cos,"tan":math.tan,"log":math.log,
+      "log10":math.log10,"exp":math.exp,"floor":math.floor,"ceil":math.ceil}
+_CONST={"pi":math.pi,"e":math.e}
+def _ev(n):
+    if isinstance(n,ast.Constant) and isinstance(n.value,(int,float)) and not isinstance(n.value,bool): return n.value
+    if isinstance(n,ast.BinOp) and type(n.op) in _OPS:
+        a=_ev(n.left); b=_ev(n.right)
+        if isinstance(n.op,ast.Pow) and (abs(b)>1000 or abs(a)>1e6): raise ValueError("exponente demasiado grande")
+        return _OPS[type(n.op)](a,b)
+    if isinstance(n,ast.UnaryOp) and isinstance(n.op,(ast.UAdd,ast.USub)):
+        v=_ev(n.operand); return v if isinstance(n.op,ast.UAdd) else -v
+    if isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id in _FUN and len(n.args)<=2 and not n.keywords:
+        return _FUN[n.func.id](*[_ev(x) for x in n.args])
+    if isinstance(n,ast.Name) and n.id in _CONST: return _CONST[n.id]
+    raise ValueError("expresión no permitida")
+def calcular(expr):
+    """Calculadora segura (no ejecuta código): + - * / ** % // paréntesis, sqrt, round, sin, cos, log, pi..."""
+    e=(expr or "").strip().lower()
+    if not e or len(e)>200: raise ValueError("expresión vacía o muy larga")
+    e=e.replace("^","**").replace("×","*").replace("÷","/")
+    e=re.sub(r"(\d+(?:\.\d+)?)\s*%\s*de\s*(\d+(?:\.\d+)?)",r"(\1/100*\2)",e)
+    e=re.sub(r"(\d+(?:\.\d+)?)\s*%",r"(\1/100)",e)
+    e=re.sub(r"(?<=\d)\s*x\s*(?=\d)","*",e)
+    if "(" not in e: e=e.replace(",",".")
+    val=_ev(ast.parse(e,mode="eval").body)
+    if isinstance(val,float) and val.is_integer() and abs(val)<1e15: val=int(val)
+    txt=f"{val:,}" if isinstance(val,int) else f"{val:,.10g}"
+    return f"{(expr or '').strip()} = {txt}"
+async def calc_cmd(update,context):
+    expr=" ".join(context.args or []).strip()
+    if not expr:
+        await update.message.reply_text("Usa: /calc (12+8)*3 · /calc 15% de 230 · /calc sqrt(144) · /calc 2^10"); return
+    try: await update.message.reply_text("🧮 "+calcular(expr))
+    except Exception: await update.message.reply_text("No pude calcular eso 🤔 Prueba con algo como: /calc (12+8)*3")
+
+TOOLS_KW=re.compile(r"\b(clima|temperatura|llover|llueve|lluvia|pron[oó]stico|d[oó]lar(?:es)?|euros?|soles?|tipo de cambio|cu[aá]nto (?:es|son|cuesta|vale|queda|da)|convierte|convertir|calcula\w*|ra[ií]z|porcentaje)\b|\d\s*[\+\-\*/x×÷\^]\s*\d|\d\s*%",re.I)
+PLAN_SYS=("Decide qué herramientas necesita el mensaje del usuario para responderse con datos reales. Herramientas: "
+          "clima(ciudad) · dolar('monto moneda_origen moneda_destino', por ejemplo '100 usd pen'; vacío para ver las tasas) · "
+          "calc(expresión matemática simple; usa ** para potencias y escribe los porcentajes como multiplicación, ej: 230*0.15) · "
+          "buscar(consulta web; solo si necesita datos actuales de internet). "
+          'Responde SOLO un JSON: {"tools":[{"name":"clima","arg":"Lima"}]} o {"tools":[]} si no hace falta ninguna. Máximo 3 herramientas.')
+async def _planificar(texto):
+    try:
+        r=await allm([{"role":"system","content":PLAN_SYS},{"role":"user","content":texto[:600]}],
+                     max_tokens=200,temperature=0,modelos=["llama-3.1-8b-instant"])
+        m=re.search(r"\{.*\}",r,re.S)
+        data=json.loads(m.group(0)) if m else {}
+        out=[]
+        for t in (data.get("tools") or [])[:3]:
+            n=str(t.get("name","")).lower(); a=str(t.get("arg","")).strip()
+            if n in ("clima","dolar","calc","buscar"): out.append((n,a[:300]))
+        return out
+    except Exception as e:
+        logging.warning(f"Planificador falló: {type(e).__name__}"); return []
+async def _ejecutar_herramientas(texto):
+    plan=await _planificar(texto)
+    if not plan: return "",[]
+    salidas=[]; nombres=[]
+    for nombre,arg in plan:
+        try:
+            if nombre=="clima":
+                res=await asyncio.to_thread(obtener_clima,arg) if arg else "(falta la ciudad)"
+            elif nombre=="dolar": res=await asyncio.to_thread(convertir_texto,arg.split())
+            elif nombre=="calc": res=calcular(arg)
+            else: res=(await asyncio.to_thread(buscar_en_internet,arg or texto)) or "(sin resultados)"
+        except Exception as e: res=f"(la herramienta falló: {str(e)[:100]})"
+        salidas.append(f"[{nombre}({arg})]\n{str(res)[:1500]}")
+        nombres.append({"clima":"clima","dolar":"cambio","calc":"calculadora","buscar":"búsqueda"}[nombre])
+    return "\n\n".join(salidas),nombres
+
+MODOS_IA.update({
+ "herramientas":{"tag":"","modelos":None,"tokens":1500,"temp":0.4,"effort":"low"},
+ "corto":{"tag":"✂️ VERSIÓN CORTA","modelos":None,"tokens":400,"temp":0.3,"effort":"low"},
+ "detalle":{"tag":"📋 VERSIÓN DETALLADA","modelos":MODELOS_LISTOS,"tokens":2000,"temp":0.5,"effort":"medium"}})
+_sistema_modo_v29=_sistema_modo
+def _sistema_modo(modo,uid,grupo,extra=""):
+    if modo=="corto":
+        return "Reescribe el texto del usuario de forma mucho más corta: máximo 3 líneas, conservando lo esencial, en el mismo idioma. Devuelve solo el texto."
+    if modo=="detalle":
+        return "Amplía y explica con más detalle el texto del usuario: añade contexto, ejemplos y pasos si aplica, en el mismo idioma, sin inventar datos."+_FORMATO
+    if modo=="herramientas":
+        return (construir_system(uid,grupo)+" Se te dan RESULTADOS DE HERRAMIENTAS con datos reales: úsalos como fuente principal, "
+                "no los contradigas ni inventes cifras; si una herramienta falló, dilo brevemente."+_FORMATO)
+    return _sistema_modo_v29(modo,uid,grupo,extra)
+
+# ======================================================================
+# 2) BOTONES BAJO CADA RESPUESTA DE LA IA
+# ======================================================================
+ia_ctx={}   # (chat, mensaje) -> datos para regenerar, traducir, acortar...
+def _guardar_ctx_ia(sent,uid,ck,texto,modo,base,extra,resp):
+    ia_ctx[(sent.chat_id,sent.message_id)]={"uid":uid,"ck":ck,"texto":texto,"modo":modo,"base":base,"extra":extra,"resp":resp,"t":time.time()}
+    if len(ia_ctx)>400:
+        for k in sorted(ia_ctx,key=lambda x:ia_ctx[x]["t"])[:100]: ia_ctx.pop(k,None)
+def _kb_ia():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔁 Regenerar",callback_data="ia:reg"),InlineKeyboardButton("🔊 Voz",callback_data="ia:voz"),
+         InlineKeyboardButton("🌐 Traducir",callback_data="ia:trad")],
+        [InlineKeyboardButton("✂️ Más corto",callback_data="ia:corto"),InlineKeyboardButton("📋 Más detalle",callback_data="ia:det")]])
+
+async def enviar_ia(update,texto,tag="",kb=None):
+    """Envía la respuesta de la IA con formato; los botones van en el último mensaje. Devuelve ese último mensaje."""
+    msg=update.effective_message
+    partes=partir_md(texto or "(sin contenido)")
+    ultimo=None
+    for i,p in enumerate(partes):
+        cuerpo=md_a_html(p)
+        if i==0 and tag: cuerpo=f"<b>⟦ {html.escape(tag,quote=False)} ⟧</b>\n\n"+cuerpo
+        rm=kb if i==len(partes)-1 else None
+        try: ultimo=await msg.reply_text(cuerpo,parse_mode="HTML",disable_web_page_preview=True,reply_markup=rm)
+        except Exception:
+            ultimo=await msg.reply_text((f"⟦ {tag} ⟧\n\n" if i==0 and tag else "")+p,reply_markup=rm)
+        await asyncio.sleep(0.15)
+    return ultimo
+
+async def responder_ia(update,context,texto,modo="chat",base=None,extra="",quiere_voz=False,guardar=True,regen=False,prev_resp="",alt="chat"):
+    """El motor único de la IA (chat, comandos y botones). Ahora con herramientas y botones bajo la respuesta."""
+    uid=update.effective_user.id; ck=ckey(update); grupo=en_grupo(update)
+    msg=update.effective_message
+    herr_txt=""; tag_herr=""
+    if modo=="herramientas":
+        herr_txt,nombres=await _ejecutar_herramientas(texto)
+        if herr_txt: tag_herr="🛠️ HERRAMIENTAS: "+", ".join(nombres)
+        else: modo=alt if alt!="herramientas" else "chat"
+    cfg=MODOS_IA.get(modo,MODOS_IA["chat"]); ctx_busq=""
+    if modo=="buscar":
+        ctx_busq=await asyncio.to_thread(buscar_en_internet,texto)
+    async with lock_de(ck):   # un pedido a la vez por persona: así la memoria no se mezcla
+        try:
+            try: await update.effective_chat.send_action("typing")
+            except Exception: pass
+            memoria=get_memory(ck)
+            if modo=="herramientas":
+                contenido=f"RESULTADOS DE HERRAMIENTAS (datos reales):\n{herr_txt}\n\nPregunta del usuario: {texto}"
+            elif modo=="buscar":
+                contenido=(f"INFO INTERNET sobre '{texto}':\n{ctx_busq}\n\nPregunta: {texto}" if ctx_busq else
+                           f"(No pude conectar a internet ahora; responde con lo que sabes y avisa brevemente que puede estar desactualizado)\nPregunta: {texto}")
+            elif base: contenido=f"{texto}\n\nTEXTO:\n{base[:9000]}"
+            else: contenido=texto
+            hist=list(memoria[-12:]) if guardar else []
+            resp=await allm([{"role":"system","content":_sistema_modo(modo,uid,grupo,extra)},*hist,{"role":"user","content":contenido}],
+                            max_tokens=cfg["tokens"],temperature=min(1.0,cfg["temp"]+(0.15 if regen else 0)),
+                            modelos=cfg["modelos"],esfuerzo=cfg["effort"])
+            if guardar:
+                if regen and prev_resp and memoria and memoria[-1].get("role")=="assistant" and memoria[-1].get("content")==prev_resp[:1500]:
+                    memoria.pop()
+                    if memoria and memoria[-1].get("role")=="user": memoria.pop()
+                memoria.append({"role":"user","content":(texto if not base else f"{texto} [con texto adjunto]")[:1500]})
+                memoria.append({"role":"assistant","content":resp[:1500]})
+                user_memories[ck]=memoria[-14:]; guardar_memorias(ck)
+            tag=tag_herr or (cfg["tag"] if (modo!="buscar" or ctx_busq) else "")
+            sent=await enviar_ia(update,resp,tag,_kb_ia())
+            if sent is not None: _guardar_ctx_ia(sent,uid,ck,texto,modo,base,extra,resp)
+            if quiere_voz: await enviar_audio(update,resp)
+            if APRENDER_PERFIL and guardar and modo in ("chat","avanzado") and RE_PERFIL.search(texto):
+                t=asyncio.create_task(aprender_perfil(uid,texto)); _tareas.add(t); t.add_done_callback(_tareas.discard)
+        except Exception as e:
+            logging.error(f"Error en la IA ({modo}): {type(e).__name__}")
+            if modo=="buscar" and ctx_busq:
+                await msg.reply_text("🔎 Resultado directo (la IA está saturada):\n"+ctx_busq[:3000])
+            else:
+                await msg.reply_text(msg_error(e))
+                if "429" not in str(e) and "rate" not in str(e).lower():
+                    await alertar_admin(f"Error en la IA ({modo})",f"{type(e).__name__}: {str(e)[:300]}")
+
+async def ia_callback(update,context):
+    q=update.callback_query; uid=q.from_user.id
+    ctx=ia_ctx.get((q.message.chat_id,q.message.message_id))
+    if not ctx:
+        await q.answer("Esa respuesta ya caducó. Pídemelo de nuevo 🙏",show_alert=True); return
+    if uid!=ctx["uid"]:
+        await q.answer("Solo quien hizo la pregunta puede usar estos botones 🔒",show_alert=True); return
+    acc=q.data.split(":",1)[1]
+    if acc=="voz":
+        await q.answer("Generando voz…")
+        if not await enviar_audio(update,ctx["resp"]):
+            await q.message.reply_text("⚠️ No pude generar la voz ahora.")
+        return
+    if not await consumir(update):
+        await q.answer(); return
+    await q.answer("Procesando…")
+    if acc=="reg":
+        await responder_ia(update,context,ctx["texto"],ctx["modo"],base=ctx["base"],extra=ctx["extra"],regen=True,prev_resp=ctx["resp"])
+    elif acc=="trad":
+        destino="inglés" if detectar_idioma(ctx["resp"])=="es" else "español"
+        await responder_ia(update,context,"Traduce este texto","traducir",base=ctx["resp"],extra=f"Traduce al {destino}.",guardar=False)
+    elif acc=="corto":
+        await responder_ia(update,context,"Hazlo más corto","corto",base=ctx["resp"],guardar=False)
+    elif acc=="det":
+        await responder_ia(update,context,"Explícalo con más detalle","detalle",base=ctx["resp"],guardar=False)
+
+# ======================================================================
+# 3) MODERACIÓN DE GRUPOS (solo admins del grupo)
+# ======================================================================
+_usernames={}      # @usuario (minúsculas) -> id (solo en memoria; se llena cuando alguien escribe en un grupo)
+_admin_cache={}    # (chat, usuario) -> (momento, es_admin)
+
+async def _es_admin_cacheado(context,cid,uid):
+    t=time.time(); c=_admin_cache.get((cid,uid))
+    if c and t-c[0]<300: return c[1]
+    try:
+        mb=await context.bot.get_chat_member(cid,uid); r=mb.status in ("administrator","creator")
+    except Exception: r=False
+    _admin_cache[(cid,uid)]=(t,r)
+    return r
+
+def _objetivo_mod(update):
+    """(id, nombre) por respuesta, mención o ID. (None,'@x') si no conozco el @usuario; (None,None) si no hay objetivo."""
+    m=update.message; rm=m.reply_to_message
+    if rm and rm.from_user and not rm.from_user.is_bot:
+        return rm.from_user.id,nombre_corto(rm.from_user)
+    for e in (m.entities or []):
+        if e.type=="text_mention" and e.user: return e.user.id,nombre_corto(e.user)
+    for e in (m.entities or []):
+        if e.type=="mention":
+            un=m.parse_entity(e).lstrip("@").lower()
+            if un in _usernames: return _usernames[un],"@"+un
+            for u2,r in economia.items():
+                if r.get("un")==un: return u2,(r.get("n") or un)
+            return None,"@"+un
+    for a in (context_args_seguro(update)):
+        if a.isdigit() and len(a)>=6: return int(a),a
+    return None,None
+def context_args_seguro(update):
+    partes=(update.message.text or "").split()[1:]
+    return partes
+
+async def _silenciar(context,cid,tid,seg):
+    try:
+        until=datetime.now(timezone.utc)+timedelta(seconds=max(seg,35))
+        await context.bot.restrict_chat_member(cid,tid,permissions=ChatPermissions(can_send_messages=False),until_date=until)
+        return True
+    except Exception as e:
+        logging.warning(f"No pude silenciar: {type(e).__name__}"); return False
+async def _expulsar(context,cid,tid):
+    expulsados[(cid,tid)]=time.time()
+    try:
+        await context.bot.ban_chat_member(cid,tid)
+        await context.bot.unban_chat_member(cid,tid,only_if_banned=True)   # sale pero puede volver a entrar
+        return True
+    except Exception as e:
+        logging.warning(f"No pude expulsar: {type(e).__name__}"); return False
+
+async def _mod_preparar(update,context,requiere_bot=True,objetivo_admin_ok=False):
+    """Valida grupo, admin, permisos del bot y objetivo. Devuelve (cid, tid, nombre) o None (ya respondió)."""
+    m=update.message
+    if not await _solo_admin_grupo(update,context): return None
+    cid=update.effective_chat.id
+    tid,tnom=_objetivo_mod(update)
+    if tid is None:
+        extra=f"\nNo conozco a {tnom}: tiene que haber escrito en el grupo (mejor responde a su mensaje)." if tnom else ""
+        await m.reply_text("Responde al mensaje de la persona con el comando (o menciónala con @usuario)."+extra); return None
+    if tid==context.bot.id or tid==update.effective_user.id:
+        await m.reply_text("Ese objetivo no es válido 😅"); return None
+    if requiere_bot:
+        p=await permisos_bot(context,cid)
+        if not p["restringir"]:
+            await m.reply_text("Necesito ser administrador con permiso de restringir y expulsar miembros ⚙️"); return None
+    if not objetivo_admin_ok:
+        try:
+            mb=await context.bot.get_chat_member(cid,tid)
+            if mb.status in ("administrator","creator"):
+                await m.reply_text("No puedo moderar a un administrador 🛡️"); return None
+        except Exception: pass
+    return cid,tid,tnom
+
+def _args_sin_mencion(context): return [a for a in (context.args or []) if not a.startswith("@") and not (a.isdigit() and len(a)>=6)]
+
+async def _aplicar_warn(context,cid,tid,tnom,razon):
+    cfg=cfg_g(cid); w=cfg.setdefault("warns",{}); lim=cfg.get("warn_lim",3)
+    n=w.get(str(tid),0)+1
+    if n>=lim:
+        w.pop(str(tid),None); persistir("grupos",cid)
+        ok=await _silenciar(context,cid,tid,86400)
+        return f"⚠️ {tnom} llegó a {lim}/{lim} advertencias ({razon}). "+("Silenciado 24 h 🔇" if ok else "No pude silenciarlo (revisa mis permisos).")
+    w[str(tid)]=n; persistir("grupos",cid)
+    return f"⚠️ Advertencia {n}/{lim} para {tnom}: {razon}"
+
+async def warn_cmd(update,context):
+    p=await _mod_preparar(update,context)
+    if not p: return
+    cid,tid,tnom=p
+    razon=" ".join(_args_sin_mencion(context))[:150] or "sin motivo"
+    await update.message.reply_text(await _aplicar_warn(context,cid,tid,tnom,razon))
+async def unwarn_cmd(update,context):
+    p=await _mod_preparar(update,context,requiere_bot=False,objetivo_admin_ok=True)
+    if not p: return
+    cid,tid,tnom=p
+    w=cfg_g(cid).setdefault("warns",{}); n=w.get(str(tid),0)
+    if n<=1: w.pop(str(tid),None)
+    else: w[str(tid)]=n-1
+    persistir("grupos",cid)
+    await update.message.reply_text(f"✅ Quité una advertencia a {tnom}. Ahora tiene {max(0,n-1)}.")
+async def warns_cmd(update,context):
+    m=update.message
+    if not en_grupo(update): await m.reply_text("Este comando es para grupos 👥"); return
+    cid=update.effective_chat.id
+    tid,tnom=_objetivo_mod(update)
+    if tid is None: tid,tnom=update.effective_user.id,nombre_corto(update.effective_user)
+    cfg=grupos.get(cid,{})
+    await m.reply_text(f"⚠️ {tnom}: {(cfg.get('warns') or {}).get(str(tid),0)}/{cfg.get('warn_lim',3)} advertencias")
+async def warnlimite_cmd(update,context):
+    m=update.message
+    if not await _solo_admin_grupo(update,context): return
+    cid=update.effective_chat.id; cfg=cfg_g(cid)
+    if not context.args or not context.args[0].isdigit() or not (1<=int(context.args[0])<=10):
+        await m.reply_text(f"Límite actual: {cfg.get('warn_lim',3)} advertencias → silencio de 24 h.\nUsa: /warnlimite 5 (entre 1 y 10)"); return
+    cfg["warn_lim"]=int(context.args[0]); persistir("grupos",cid)
+    await m.reply_text(f"✅ Ahora a las {cfg['warn_lim']} advertencias se silencia 24 h.")
+
+async def mute_cmd(update,context):
+    p=await _mod_preparar(update,context)
+    if not p: return
+    cid,tid,tnom=p
+    args=_args_sin_mencion(context); seg=3600
+    if args:
+        d=parsear_duracion(args[0])
+        if d: seg=min(d,365*86400); args=args[1:]
+    razon=" ".join(args)[:150] or "sin motivo"
+    ok=await _silenciar(context,cid,tid,seg)
+    await update.message.reply_text((f"🔇 {tnom} silenciado {fmt_t(seg)} ({razon})" if ok else "⚠️ No pude silenciarlo (revisa mis permisos)."))
+async def unmute_cmd(update,context):
+    p=await _mod_preparar(update,context,objetivo_admin_ok=True)
+    if not p: return
+    cid,tid,tnom=p
+    try:
+        await levantar_restriccion(context.bot,cid,tid)
+        await update.message.reply_text(f"🔊 {tnom} ya puede escribir.")
+    except Exception: await update.message.reply_text("⚠️ No pude quitar el silencio.")
+async def ban_cmd(update,context):
+    p=await _mod_preparar(update,context)
+    if not p: return
+    cid,tid,tnom=p
+    razon=" ".join(_args_sin_mencion(context))[:150] or "sin motivo"
+    try:
+        await context.bot.ban_chat_member(cid,tid)
+        await update.message.reply_text(f"⛔ {tnom} fue baneado ({razon}).")
+    except Exception: await update.message.reply_text("⚠️ No pude banearlo (revisa mis permisos).")
+async def unban_cmd(update,context):
+    p=await _mod_preparar(update,context,objetivo_admin_ok=True)
+    if not p: return
+    cid,tid,tnom=p
+    try:
+        await context.bot.unban_chat_member(cid,tid,only_if_banned=True)
+        await update.message.reply_text(f"✅ {tnom} fue desbaneado y puede volver a entrar.")
+    except Exception: await update.message.reply_text("⚠️ No pude desbanearlo.")
+async def kick_cmd(update,context):
+    p=await _mod_preparar(update,context)
+    if not p: return
+    cid,tid,tnom=p
+    ok=await _expulsar(context,cid,tid)
+    await update.message.reply_text(f"👢 {tnom} fue expulsado (puede volver a entrar)." if ok else "⚠️ No pude expulsarlo (revisa mis permisos).")
+
+# ---------- filtro de palabras ----------
+def _norm(t):
+    t=unicodedata.normalize("NFKD",(t or "").lower())
+    t="".join(c for c in t if not unicodedata.combining(c))
+    return re.sub(r"(.)\1{2,}",r"\1",t)
+def _coincide_filtro(cfg,texto):
+    f=cfg.get("filtro") or {}
+    if not f.get("on") or not f.get("palabras"): return None
+    tn=_norm(texto)
+    for p in f["palabras"]:
+        pn=_norm(p)
+        if pn and re.search(rf"(?<!\w){re.escape(pn)}(?!\w)",tn): return p
+    return None
+
+async def filtro_handler(update,context):
+    m=update.effective_message; u=update.effective_user
+    if not m or not u or u.is_bot or not en_grupo(update): return
+    cid=update.effective_chat.id
+    cfg=grupos.get(cid)
+    if not cfg or not (cfg.get("filtro") or {}).get("on"): return
+    texto=m.text or m.caption or ""
+    if not texto or not _coincide_filtro(cfg,texto): return
+    if await _es_admin_cacheado(context,cid,u.id): return
+    try: await m.delete()
+    except Exception:
+        await avisar_permiso(context,cid,"borrar mensajes"); return
+    if cfg["filtro"].get("accion")=="warn":
+        txt=await _aplicar_warn(context,cid,u.id,nombre_corto(u),"palabra prohibida")
+    else:
+        txt=f"🚫 {nombre_corto(u)}, ese mensaje tenía una palabra no permitida en este grupo."
+    try:
+        w=await context.bot.send_message(cid,txt)
+        programar_borrado(context,cid,w.message_id,12)
+    except Exception: pass
+    raise ApplicationHandlerStop
+
+async def filtro_cmd(update,context):
+    m=update.message
+    if not await _solo_admin_grupo(update,context): return
+    cid=update.effective_chat.id; cfg=cfg_g(cid)
+    f=cfg.setdefault("filtro",{"on":False,"palabras":[],"accion":"borrar"})
+    partes=(m.text or "").split(None,2)
+    sub=partes[1].lower() if len(partes)>1 else ""
+    resto=partes[2].strip() if len(partes)>2 else ""
+    if sub in ("on","off"):
+        if sub=="on":
+            p=await permisos_bot(context,cid)
+            if not p["borrar"]:
+                await m.reply_text("Para activarlo necesito ser administrador con permiso de borrar mensajes."); return
+        f["on"]=(sub=="on"); persistir("grupos",cid)
+        await m.reply_text("Filtro activado ✅" if f["on"] else "Filtro desactivado ❌"); return
+    if sub in ("add","agregar","+"):
+        if not resto or len(resto)>40: await m.reply_text("Usa: /filtro add palabra (máx. 40 caracteres)"); return
+        if len(f["palabras"])>=100: await m.reply_text("Ya hay 100 palabras en el filtro."); return
+        if resto.lower() not in [x.lower() for x in f["palabras"]]: f["palabras"].append(resto)
+        persistir("grupos",cid)
+        await m.reply_text(f"✅ Agregué «{resto}» al filtro ({len(f['palabras'])} palabras). Actívalo con /filtro on"); return
+    if sub in ("del","borrar","quitar","-"):
+        antes=len(f["palabras"]); f["palabras"]=[x for x in f["palabras"] if x.lower()!=resto.lower()]
+        persistir("grupos",cid)
+        await m.reply_text("✅ Palabra quitada." if len(f["palabras"])<antes else "Esa palabra no estaba en el filtro 🤔"); return
+    if sub=="accion":
+        if resto.lower() not in ("borrar","warn"): await m.reply_text("Usa: /filtro accion borrar  o  /filtro accion warn"); return
+        f["accion"]=resto.lower(); persistir("grupos",cid)
+        await m.reply_text(f"✅ Acción del filtro: {f['accion']}"+(" (borra y suma una advertencia)" if f["accion"]=="warn" else " (solo borra el mensaje)")); return
+    lista=", ".join(f["palabras"]) or "(vacía)"
+    await m.reply_text(f"🧹 Filtro: {'activado ✅' if f['on'] else 'desactivado ❌'} · acción: {f.get('accion','borrar')}\nPalabras ({len(f['palabras'])}): {lista}\n\n"
+                       "Usa: /filtro on|off · /filtro add palabra · /filtro del palabra · /filtro accion borrar|warn\nLos administradores están exentos.")
+
+# ---------- captcha de suma ----------
+def programar_captcha(jq,cid,uid,seg):
+    if jq: jq.run_once(_cap_timeout,when=max(5,seg),data={"chat":cid,"uid":uid},name=f"cap{cid}_{uid}")
+def _quitar_job_captcha(context,cid,uid):
+    if context.job_queue:
+        for j in context.job_queue.get_jobs_by_name(f"cap{cid}_{uid}"): j.schedule_removal()
+
+async def _cap_timeout(context):
+    d=context.job.data; cid,uid=d["chat"],d["uid"]
+    cap=grupos.get(cid,{}).get("cap",{})
+    info=cap.pop(str(uid),None)
+    if not info: return
+    persistir("grupos",cid)
+    await borrar_msg(context.bot,cid,info.get("mid"))
+    ok=await _expulsar(context,cid,uid)
+    if not ok:
+        try: await levantar_restriccion(context.bot,cid,uid)
+        except Exception: pass
+        await avisar_permiso(context,cid,"expulsar miembros"); return
+    try:
+        w=await context.bot.send_message(cid,f"🚫 {info.get('n','Un usuario')} no resolvió el captcha y fue expulsado (puede volver a entrar).")
+        programar_borrado(context,cid,w.message_id,20)
+    except Exception: pass
+
+async def captcha_handler(update,context):
+    m=update.message
+    if not m or not m.new_chat_members: return
+    cid=update.effective_chat.id; cfg=grupos.get(cid,{})
+    if not cfg.get("captcha"): return
+    humanos=[x for x in m.new_chat_members if not x.is_bot][:10]
+    if not humanos: return
+    p=await permisos_bot(context,cid)
+    if not p["restringir"]:
+        await avisar_permiso(context,cid,"restringir miembros"); return
+    minutos=cfg.get("captcha_min",3)
+    thread=m.message_thread_id if getattr(m,"is_topic_message",False) else None
+    for u in humanos:
+        try:
+            mb=await context.bot.get_chat_member(cid,u.id)
+            if mb.status in ("administrator","creator","restricted"): continue
+            await context.bot.restrict_chat_member(cid,u.id,permissions=ChatPermissions(can_send_messages=False))
+        except Exception: continue
+        a=random.randint(2,15); b=random.randint(2,15); ans=a+b
+        opts={ans}
+        while len(opts)<4:
+            c=ans+random.choice([-4,-3,-2,-1,1,2,3,4,5])
+            if c>0: opts.add(c)
+        opciones=random.sample(list(opts),4)
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton(str(o),callback_data=f"cp:{u.id}:{o}") for o in opciones]])
+        try:
+            sent=await context.bot.send_message(cid,f"🧩 CAPTCHA · {u.mention_html()}, resuelve para poder escribir:\n<b>¿Cuánto es {a} + {b}?</b>\nTienes {minutos} min o se cortará tu conexión.",
+                                                parse_mode="HTML",reply_markup=kb,message_thread_id=thread)
+        except Exception as e:
+            logging.warning(f"No pude enviar el captcha: {type(e).__name__}"); continue
+        cfg_g(cid).setdefault("cap",{})[str(u.id)]={"ans":ans,"t":time.time()+minutos*60,"mid":sent.message_id,"n":nombre_corto(u),"i":0}
+        programar_captcha(context.job_queue,cid,u.id,minutos*60)
+        persistir("grupos",cid)
+
+async def captcha_callback(update,context):
+    q=update.callback_query; partes=q.data.split(":")
+    try: tid=int(partes[1]); val=int(partes[2])
+    except Exception: await q.answer(); return
+    if q.from_user.id!=tid:
+        await q.answer("Este captcha no es para ti 😅",show_alert=True); return
+    cid=q.message.chat_id
+    cap=grupos.get(cid,{}).get("cap",{}); info=cap.get(str(tid))
+    if not info:
+        await q.answer("Este captcha ya expiró.",show_alert=True); return
+    if val==info["ans"]:
+        try: await levantar_restriccion(context.bot,cid,tid)
+        except Exception:
+            await q.answer("No pude quitarte el silencio, avisa a un admin.",show_alert=True); return
+        cap.pop(str(tid),None); persistir("grupos",cid); _quitar_job_captcha(context,cid,tid)
+        await q.answer("✅ ¡Correcto! Bienvenido/a.",show_alert=True)
+        await borrar_msg(context.bot,cid,q.message.message_id)
+        return
+    info["i"]=info.get("i",0)+1
+    if info["i"]>=2:
+        cap.pop(str(tid),None); persistir("grupos",cid); _quitar_job_captcha(context,cid,tid)
+        await q.answer("❌ Incorrecto. Fuiste expulsado (puedes volver a entrar).",show_alert=True)
+        await borrar_msg(context.bot,cid,q.message.message_id)
+        await _expulsar(context,cid,tid)
+    else:
+        persistir("grupos",cid)
+        await q.answer("❌ Incorrecto. Te queda 1 intento.",show_alert=True)
+
+async def captcha_salida(update,context):
+    m=update.message
+    if not m or not m.left_chat_member: return
+    cid=update.effective_chat.id; u=m.left_chat_member
+    cap=grupos.get(cid,{}).get("cap",{})
+    if cap.pop(str(u.id),None) is not None:
+        persistir("grupos",cid); _quitar_job_captcha(context,cid,u.id)
+
+async def captcha_cmd(update,context):
+    m=update.message
+    if not await _solo_admin_grupo(update,context): return
+    cid=update.effective_chat.id; cfg=cfg_g(cid)
+    on=None; minutos=None
+    for a in (context.args or []):
+        o=parse_onoff(a)
+        if o is not None: on=o
+        elif a.isdigit(): minutos=max(1,min(30,int(a)))
+    if on is None and minutos is None:
+        await m.reply_text(f"🧩 Captcha de suma: {'activado ✅' if cfg.get('captcha') else 'desactivado ❌'} ({cfg.get('captcha_min',3)} min)\n\n"
+                           "A cada persona nueva le pregunto una suma con 4 botones. Si falla 2 veces o no responde a tiempo, se le expulsa (puede volver a entrar).\n"
+                           "Usa: /captcha on 3 · /captcha off · /captcha 5 (cambia los minutos)\n"
+                           "Al activarlo se apaga la verificación por botón (/verificacion). Necesito permiso de restringir y expulsar."); return
+    if minutos: cfg["captcha_min"]=minutos
+    if on is not None:
+        if on:
+            p=await permisos_bot(context,cid)
+            if not p["restringir"]:
+                await m.reply_text("Para activarlo necesito ser administrador con permiso de restringir y expulsar miembros."); return
+            cfg["verificar"]=False
+        cfg["captcha"]=on
+    persistir("grupos",cid)
+    await m.reply_text(f"🧩 Captcha {'activado ✅' if cfg.get('captcha') else 'desactivado ❌'} · {cfg.get('captcha_min',3)} min")
+
+# ======================================================================
+# 4) XP POR ACTIVIDAD DEL GRUPO (opcional, lo activa un admin)
+# ======================================================================
+actividad={}   # chat -> {usuario(str): [xp, mensajes, nombre]}
+NOMBRES_ESTADO=NOMBRES_ESTADO+("actividad",)
+_estado_base2=_estado
+def _estado(n): return actividad if n=="actividad" else _estado_base2(n)
+_cargar_uno("actividad")
+print(f"Actividad cargada: {len(actividad)} grupos")
+
+def nivel_act(xp): return 1+int((max(xp,0)/50)**0.5)
+def xp_act_sig(lv): return lv*lv*50
+_act_cd={}   # (chat, usuario) -> momento del último XP
+
+async def actividad_handler(update,context):
+    m=update.message; u=update.effective_user
+    if not m or not u or u.is_bot or not en_grupo(update): return
+    cid=update.effective_chat.id
+    if not grupos.get(cid,{}).get("act"): return
+    if len(m.text or "")<5: return
+    t=time.time(); k=(cid,u.id)
+    if t-_act_cd.get(k,0)<40: return
+    _act_cd[k]=t
+    rec=actividad.setdefault(cid,{}).setdefault(str(u.id),[0,0,""])
+    lv0=nivel_act(rec[0])
+    rec[0]+=random.randint(2,5); rec[1]+=1; rec[2]=nombre_corto(u)[:30]
+    lv1=nivel_act(rec[0])
+    persistir("actividad",cid)
+    if lv1>lv0:
+        extra=""
+        r=economia.get(u.id)
+        if r is not None:
+            bono=25*lv1; r["m"]+=bono; ecoguardar(u.id); extra=f" (+{fm(bono)} {MONEDA})"
+        try:
+            w=await m.reply_text(f"🎉 {nombre_corto(u)} subió al nivel {lv1} del grupo ⭐{extra}")
+            programar_borrado(context,cid,w.message_id,30)
+        except Exception: pass
+
+async def actividad_cmd(update,context):
+    m=update.message
+    if not await _solo_admin_grupo(update,context): return
+    cid=update.effective_chat.id; cfg=cfg_g(cid)
+    o=parse_onoff(context.args[0]) if context.args else None
+    if o is None:
+        await m.reply_text(f"⚡ XP por actividad: {'activado ✅' if cfg.get('act') else 'desactivado ❌'}\n"
+                           "Quien conversa gana XP (1 vez cada 40 s) y sube de nivel en este grupo. Solo cuento puntos y mensajes, no guardo lo que escriben.\n"
+                           "Usa: /actividad on · /actividad off · Todos: /rango · /activos"); return
+    cfg["act"]=o; persistir("grupos",cid)
+    await m.reply_text("XP por actividad activado ✅ Prueba con /rango" if o else "XP por actividad desactivado ❌")
+
+async def rango_cmd(update,context):
+    m=update.message
+    if not en_grupo(update): await m.reply_text("Este comando es para grupos 👥"); return
+    cid=update.effective_chat.id
+    if not grupos.get(cid,{}).get("act"):
+        await m.reply_text("La actividad del grupo está apagada. Un admin puede encenderla con /actividad on"); return
+    rm=m.reply_to_message
+    u=rm.from_user if (rm and rm.from_user and not rm.from_user.is_bot) else update.effective_user
+    g=actividad.get(cid,{}); rec=g.get(str(u.id))
+    if not rec:
+        await m.reply_text(f"{nombre_corto(u)} aún no tiene XP en este grupo. ¡A conversar! 💬"); return
+    lv=nivel_act(rec[0]); base=(lv-1)**2*50; sig=xp_act_sig(lv)
+    pos=1+sum(1 for v in g.values() if v[0]>rec[0])
+    await m.reply_text(f"👤 {nombre_corto(u)} · NIVEL {lv}\n⚡ XP {barra(rec[0]-base,sig-base,12)} {fm(rec[0])}/{fm(sig)}\n"
+                       f"💬 Mensajes contados: {fm(rec[1])}\n🏆 Puesto #{pos} de {len(g)}")
+
+async def activos_cmd(update,context):
+    m=update.message
+    if not en_grupo(update): await m.reply_text("Este comando es para grupos 👥"); return
+    cid=update.effective_chat.id
+    if not grupos.get(cid,{}).get("act"):
+        await m.reply_text("La actividad del grupo está apagada. Un admin puede encenderla con /actividad on"); return
+    g=actividad.get(cid,{})
+    if not g: await m.reply_text("Aún no hay actividad registrada 💬"); return
+    top=sorted(g.values(),key=lambda v:v[0],reverse=True)[:10]
+    med=["🥇","🥈","🥉"]; mx=max(top[0][0],1); lineas=[]
+    for i,v in enumerate(top):
+        lineas.append(f"{med[i] if i<3 else str(i+1)+'.'} {v[2] or '?'} · nivel {nivel_act(v[0])}")
+        lineas.append(f"    {barra(v[0],mx,10)} {fm(v[0])} XP")
+    await m.reply_text("🔥 LOS MÁS ACTIVOS\n\n"+"\n".join(lineas))
+
+# ======================================================================
+# 5) NEGOCIOS CON INGRESOS PASIVOS (economía)
+# ======================================================================
+NEGOCIOS={"kiosko":{"n":"🏪 Kiosko","p":3000,"ing":250,"lv":1},
+          "foodtruck":{"n":"🍔 Food truck","p":9000,"ing":800,"lv":3},
+          "cabina":{"n":"💻 Cabina gamer","p":25000,"ing":2400,"lv":5},
+          "depa":{"n":"🏠 Departamento","p":80000,"ing":8000,"lv":7},
+          "edificio":{"n":"🏢 Edificio","p":300000,"ing":33000,"lv":10},
+          "granja":{"n":"🤖 Granja de bots","p":1000000,"ing":120000,"lv":14}}
+NEG_MAX_DIAS=3      # lo máximo que se acumula sin cobrar
+NEG_MAX_UNID=10     # unidades máximas por tipo de negocio
+NEG_MANT=0.05       # mantenimiento al cobrar
+
+def _precio_neg(r,k): return int(NEGOCIOS[k]["p"]*(1+0.35*r.get("neg",{}).get(k,0)))
+def _ingreso_diario(r): return sum(NEGOCIOS[k]["ing"]*n for k,n in r.get("neg",{}).items() if k in NEGOCIOS)
+def _pendiente(r):
+    d=_ingreso_diario(r)
+    if d<=0: return 0
+    dias=min((time.time()-r.get("nc",time.time()))/86400,NEG_MAX_DIAS)
+    return int(d*max(dias,0))
+def _cobrar_pendiente(r):
+    """Cobra lo acumulado (con mantenimiento). Devuelve (neto, mantenimiento)."""
+    pend=_pendiente(r)
+    r["nc"]=time.time()
+    if pend<1: return 0,0
+    mant=int(pend*NEG_MANT); neto=pend-mant
+    r["m"]+=neto
+    return neto,mant
+
+def _texto_negocios(r):
+    neg=r.get("neg",{}); lineas=[]
+    for k,nd in NEGOCIOS.items():
+        lineas.append(f"{nd['n']} — {fm(_precio_neg(r,k))} {MONEDA} → +{fm(nd['ing'])}/día · nivel {nd['lv']} · tienes {neg.get(k,0)}")
+    return ("\n".join(lineas)+f"\n\n◈ Ingreso diario: {fm(_ingreso_diario(r))} {MONEDA} · Pendiente: {fm(_pendiente(r))} {MONEDA}\n"
+            f"Se acumulan hasta {NEG_MAX_DIAS} días y se cobran con /cobrar (mantenimiento {int(NEG_MANT*100)}%). Cada unidad extra cuesta más.")
+def teclado_negocios(r):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(f"{nd['n']} · {fm(_precio_neg(r,k))}",callback_data=f"ng:{k}")] for k,nd in NEGOCIOS.items()])
+
+def _comprar_neg(r,k):
+    nd=NEGOCIOS[k]; neg=r.setdefault("neg",{}); tiene=neg.get(k,0)
+    if nivel(r["xp"])<nd["lv"]: return f"Necesitas nivel {nd['lv']} para {nd['n']} ⭐"
+    if tiene>=NEG_MAX_UNID: return "Ya tienes el máximo de ese negocio."
+    precio=_precio_neg(r,k)
+    neto,_m=_cobrar_pendiente(r)
+    extra=f"(cobré {fm(neto)} {MONEDA} pendientes) " if neto else ""
+    if r["m"]<precio: return f"{extra}Te faltan {fm(precio-r['m'])} {MONEDA} (cuesta {fm(precio)})."
+    r["m"]-=precio; neg[k]=tiene+1
+    return f"✅ Compraste {nd['n']} por {fm(precio)} {MONEDA}. {extra}Ingreso: +{fm(nd['ing'])}/día."
+
+async def negocios_cmd(update,context):
+    u=update.effective_user; r=eco(u); eco_g(r,update); ecoguardar(u.id)
+    await update.message.reply_text(_texto_negocios(r)+"\n\nToca un botón para comprar 1 👇",reply_markup=teclado_negocios(r))
+async def negocios_callback(update,context):
+    q=update.callback_query; uid=q.from_user.id
+    clave=q.data.split(":",1)[1]
+    if clave not in NEGOCIOS: await q.answer(); return
+    r=eco(q.from_user); msg=_comprar_neg(r,clave); ecoguardar(uid)
+    await q.answer(msg[:190],show_alert=True)
+    try: await q.edit_message_text(hud("NEGOCIOS",_texto_negocios(r)+"\n\nToca un botón para comprar 1 👇",uid),reply_markup=teclado_negocios(r))
+    except Exception: pass
+async def cobrar_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update)
+    if _ingreso_diario(r)<=0:
+        ecoguardar(u.id); await m.reply_text("No tienes negocios todavía 🏢 Mira /negocios"); return
+    pend=_pendiente(r)
+    if pend<1:
+        ecoguardar(u.id); await m.reply_text("Aún no hay ingresos acumulados ⏳ Vuelve en un rato."); return
+    tope=(time.time()-r.get("nc",time.time()))/86400>=NEG_MAX_DIAS
+    neto,mant=_cobrar_pendiente(r)
+    txt=dar(r,0,5,boost=False)+check_logros(r); ecoguardar(u.id)
+    await m.reply_text(f"🏢 Cobraste +{fm(neto)} {MONEDA} (mantenimiento {fm(mant)})\n👛 Wallet: {fm(r['m'])} {MONEDA}"
+                       +(f"\n⚠️ Llegaste al tope de {NEG_MAX_DIAS} días acumulados: cobra más seguido." if tope else "")+txt)
+async def misnegocios_cmd(update,context):
+    m=update.message; u=update.effective_user; r=eco(u); eco_g(r,update); ecoguardar(u.id)
+    neg={k:n for k,n in r.get("neg",{}).items() if n>0 and k in NEGOCIOS}
+    if not neg: await m.reply_text("No tienes negocios todavía 🏢 Mira /negocios"); return
+    lineas=[f"{NEGOCIOS[k]['n']} × {n} → +{fm(NEGOCIOS[k]['ing']*n)}/día" for k,n in neg.items()]
+    await m.reply_text("\n".join(lineas)+f"\n\n◈ Ingreso diario: {fm(_ingreso_diario(r))} {MONEDA}\n◈ Pendiente por cobrar: {fm(_pendiente(r))} {MONEDA}\nUsa /cobrar")
 # ---------- ADMIN: STATS, BROADCAST, BACKUP ----------
 def es_admin(update): return bool(ADMIN_ID) and update.effective_user.id==ADMIN_ID
 async def id_cmd(update,context):
@@ -4156,7 +4876,7 @@ async def stats_cmd(update,context):
         f"Usos de IA hoy: {usos_hoy} (límite por usuario: {LIMITE_DIARIO if LIMITE_DIARIO>0 else 'sin límite'})\n"
         f"Búsquedas web hoy: {_compound['n']}\nRecordatorios activos: {len(recordatorios)}\nNotas guardadas: {n_notas}\n"
         f"Economía: {len(economia)} cuentas · {fm(sum(tot_eco(r) for r in economia.values()))} {MONEDA} en circulación\n"
-        f"Grupos con configuración: {len([k for k in grupos if k!=0])} · activos desde el reinicio: {len(msgs_grupo)}\n"
+        f"Grupos con configuración: {len([k for k in grupos if k!=0])} · con XP de actividad: {len(actividad)} · activos desde el reinicio: {len(msgs_grupo)}\n"
         f"Verificaciones pendientes: {n_pend}\n"
         f"Tareas pesadas en curso: {len(_ocupados)} (máx. {MAX_PESADOS} a la vez)\n"
         f"ffmpeg (audios, videos y TikTok): {'✅' if _ffmpeg_exe() else '❌ falta imageio-ffmpeg'}\n"
@@ -4203,6 +4923,10 @@ async def registrar_usuario(update,context):
         u=update.effective_user
         if not u or u.is_bot: return
         m=update.message
+        # recuerda el @usuario (solo en memoria) para poder moderar por mención
+        if u.username and en_grupo(update):
+            if len(_usernames)>5000: _usernames.clear()
+            _usernames[u.username.lower()]=u.id
         # guarda en memoria RAM los últimos mensajes del grupo (para /resumen)
         if en_grupo(update) and m and m.text and not m.text.startswith("/"):
             guardar_msg_grupo(update)
@@ -4224,8 +4948,10 @@ async def privacidad_cmd(update,context):
         "Lo que guardo de ti:\n"
         "• Tus últimos 20 mensajes con la IA (separados: el chat privado y cada grupo van aparte)\n"
         "• Tu perfil (datos que me cuentas), tu modo, tus ajustes de voz y tema, tus notas y tus recordatorios\n"
-        "• Tu cuenta de economía (créditos, nivel, inventario, logros)\n"
-        "• Tu nombre, tu @usuario y cuántos mensajes me escribes\n\n"
+        "• Tu cuenta de economía (créditos, nivel, inventario, negocios, logros)\n"
+        "• Tu nombre, tu @usuario y cuántos mensajes me escribes\n"
+        "• Si un admin activa la actividad de un grupo: tus puntos de XP y cuántos mensajes contaron (no el contenido)\n"
+        "• Las advertencias de moderación las controlan los admins de cada grupo\n\n"
         "Lo que NO se guarda:\n"
         "• Fotos, audios, videos y archivos: se procesan y solo quedan unos minutos en memoria\n"
         "• La charla de los grupos para /resumen: solo está en la memoria de mi servidor (los últimos 120 mensajes) y se pierde al reiniciar\n"
@@ -4239,7 +4965,7 @@ async def borrardatos_cmd(update,context):
         await update.message.reply_text("Por privacidad, usa /borrardatos en mi chat privado 🔒"); return
     kb=InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ Sí, borrar mis datos",callback_data="bd:si"),
                               InlineKeyboardButton("Cancelar",callback_data="bd:no")]])
-    await update.message.reply_text("Esto borra TODO lo que guardé de ti: tus chats con la IA (también los de grupos), tu perfil, tus notas, tu modo, tus recordatorios y tu cuenta de economía (perderías tus créditos).\n¿Seguro?",reply_markup=kb)
+    await update.message.reply_text("Esto borra TODO lo que guardé de ti: tus chats con la IA (también los de grupos), tu perfil, tus notas, tu modo, tus recordatorios, tu XP de grupos y tu cuenta de economía (perderías tus créditos y negocios).\n¿Seguro?",reply_markup=kb)
 
 async def borrar_datos_usuario(uid,context):
     claves=[k for k in list(user_memories) if k==uid or (isinstance(k,str) and k.endswith(f":{uid}"))]
@@ -4251,15 +4977,17 @@ async def borrar_datos_usuario(uid,context):
         recordatorios.remove(r)
         if context.job_queue:
             for j in context.job_queue.get_jobs_by_name(f"rec{r['id']}"): j.schedule_removal()
+    grupos_xp=[cid for cid,g in list(actividad.items()) if g.pop(str(uid),None) is not None]
     for n,k in list(_sucio):
         if (n=="memorias" and k in claves) or (n in ("perfiles","notas","usuarios","economia") and k==uid): _sucio.discard((n,k))
     if USA_KV:
         items=[("memorias",k) for k in claves]+[("perfiles",uid),("notas",uid),("usuarios",uid),("economia",uid)]
         await asyncio.to_thread(_borrar_kv,items)
+        for cid in grupos_xp: persistir("actividad",cid)
     else:
-        for n in ("memorias","perfiles","notas","usuarios","economia"): persistir(n)
+        for n in ("memorias","perfiles","notas","usuarios","economia","actividad"): persistir(n)
     if quitados: persistir("recordatorios")
-    return f"{len(claves)} conversaciones, perfil, notas, economía y {len(quitados)} recordatorios"
+    return f"{len(claves)} conversaciones, perfil, notas, economía, XP de {len(grupos_xp)} grupos y {len(quitados)} recordatorios"
 
 async def borrardatos_callback(update,context):
     q=update.callback_query; uid=q.from_user.id
@@ -4287,7 +5015,7 @@ async def imagen_cmd(update,context):
     if not await consumir(update): return
     await crear_imagen(update," ".join(context.args))
 
-# ---------- CHAT PRINCIPAL (con el router de modos) ----------
+# ---------- CHAT PRINCIPAL (con el router de modos y herramientas) ----------
 _ultimo_msg={}
 async def ia_reply(update:Update, context:ContextTypes.DEFAULT_TYPE, texto_override=None):
     if not update.message: return   # ignora mensajes editados y otros tipos de actualización
@@ -4353,13 +5081,16 @@ async def ia_reply(update:Update, context:ContextTypes.DEFAULT_TYPE, texto_overr
     if es_pedido_imagen(texto_corregido):
         await crear_imagen(update,texto_corregido); return
 
-    # el cerebro decide solo el modo: pensar, redactar, traducir, resumir, buscar o chat
+    # el cerebro decide solo el modo: pensar, redactar, traducir, resumir, buscar, herramientas o chat
     modo,base=detectar_modo(texto_corregido,update,grupo)
     if modo=="resumen_grupo":
         await _resumen_grupo(update,context); return
     if modo=="resumir_link":
         await resumir_link_ia(update,context,base,texto_corregido,quiere_voz=voz); return
-    await responder_ia(update,context,texto_corregido,modo,base=base,quiere_voz=voz)
+    alt=modo
+    if modo in ("chat","avanzado","buscar") and TOOLS_KW.search(texto_corregido):
+        modo="herramientas"   # clima, cambio, calculadora o búsqueda: la IA decide cuáles usar
+    await responder_ia(update,context,texto_corregido,modo,base=base,quiere_voz=voz,alt=alt)
 
 async def voz_handler(update,context):
     if not update.message: return
@@ -4437,9 +5168,13 @@ def limpiar_memoria():
         while dq and t-dq[0]>120: dq.popleft()
         if not dq: joins.pop(cid,None)
     for dic,ttl in ((expulsados,600),(_aviso_perm,3600),(_aviso_spam,3600),(_alertas,3600),(_aviso_error,3600),
-                    (_ultimo_msg,600),(_marca_usr,3600),(ult_saludo_ts,86400)):
+                    (_ultimo_msg,600),(_marca_usr,3600),(ult_saludo_ts,86400),(_act_cd,3600)):
         for k,v in list(dic.items()):
             if t-v>ttl: dic.pop(k,None)
+    for k,v in list(_admin_cache.items()):
+        if t-v[0]>600: _admin_cache.pop(k,None)
+    for k,v in list(ia_ctx.items()):
+        if t-v["t"]>7200: ia_ctx.pop(k,None)
     for k,v in list(uso_diario.items()):
         if v[0]!=hoy: uso_diario.pop(k,None)
     for cid,d in list(msgs_grupo.items()):
@@ -4476,8 +5211,9 @@ async def post_init(app):
             BotCommand("ayuda","Módulos y comandos"),BotCommand("economia","Créditos, juegos y tienda"),
             BotCommand("saldo","Ver mi wallet"),BotCommand("diario","Recompensa diaria"),
             BotCommand("trabajar","Completar un contrato"),BotCommand("radar","Mis esperas y misiones"),
+            BotCommand("negocios","Negocios con ingresos pasivos"),BotCommand("cobrar","Cobrar mis negocios"),
             BotCommand("apostar","Apostar créditos"),BotCommand("top","Ranking"),BotCommand("tienda","Mercado cyber"),
-            BotCommand("cripto","Precio de criptomonedas"),BotCommand("igv","Calculadora de IGV"),
+            BotCommand("cripto","Precio de criptomonedas"),BotCommand("igv","Calculadora de IGV"),BotCommand("calc","Calculadora"),
             BotCommand("imagen","Crear una imagen"),BotCommand("vozconfig","Ajustes de voz de la IA"),
             BotCommand("sistema","Estado del sistema NEXUS"),BotCommand("ping","Latencia"),BotCommand("tema","Estilo futurista on/off"),
             BotCommand("tt","Bajar TikTok sin marca"),BotCommand("mp3","Audio de un TikTok"),
@@ -4491,14 +5227,19 @@ async def post_init(app):
             BotCommand("recordar","Crear recordatorio"),BotCommand("recordatorios","Ver recordatorios"),
             BotCommand("modo","Cambiar personalidad"),BotCommand("perfil","Ver tu perfil"),
             BotCommand("privacidad","Qué guarda el bot de ti"),BotCommand("borrardatos","Borrar todos mis datos"),
-            BotCommand("reglas","Ver las reglas del grupo"),
+            BotCommand("reglas","Ver las reglas del grupo"),BotCommand("rango","Mi nivel en el grupo"),BotCommand("activos","Los más activos del grupo"),
             BotCommand("panel","Panel de bienvenida y seguridad (admins)"),
             BotCommand("bienvenida","Bienvenida del grupo (admins)"),
             BotCommand("mensajebienvenida","Personalizar el mensaje de bienvenida"),
             BotCommand("fotobienvenida","Foto o video de bienvenida"),
             BotCommand("botonbienvenida","Botones de enlace del saludo"),
             BotCommand("verificacion","Verificación anti-bots (admins)"),
+            BotCommand("captcha","Captcha de suma para nuevos (admins)"),
             BotCommand("antispam","Anti-spam a recién llegados (admins)"),
+            BotCommand("filtro","Filtro de palabras (admins)"),
+            BotCommand("warn","Advertir a alguien (admins)"),BotCommand("mute","Silenciar a alguien (admins)"),
+            BotCommand("ban","Banear a alguien (admins)"),
+            BotCommand("actividad","XP por actividad del grupo (admins)"),
             BotCommand("despedida","Mensaje de despedida (admins)"),
             BotCommand("lluvia","Lluvia de créditos (admins)"),BotCommand("sorteo","Sorteo con créditos (admins)"),
             BotCommand("clear","Borrar memoria del chat")])
@@ -4508,9 +5249,12 @@ async def post_init(app):
             if r["ts"]<time.time()-86400: recordatorios.remove(r); continue
             programar(app.job_queue,r)
         for cid_,cfg_ in list(grupos.items()):
-            # retoma las verificaciones que quedaron pendientes si el bot se reinició
+            # retoma las verificaciones y los captchas que quedaron pendientes si el bot se reinició
             for uid_s,info in list((cfg_.get("pend") or {}).items()):
                 try: programar_verif(app.job_queue,cid_,int(uid_s),info.get("t",0)-time.time())
+                except Exception: pass
+            for uid_s,info in list((cfg_.get("cap") or {}).items()):
+                try: programar_captcha(app.job_queue,cid_,int(uid_s),info.get("t",0)-time.time())
                 except Exception: pass
             # retoma los sorteos activos
             s=cfg_.get("sorteo")
@@ -4525,7 +5269,8 @@ if __name__=="__main__":
     app=(ApplicationBuilder().token(TOKEN).concurrent_updates(MAX_CONCURRENTES)
          .post_init(post_init).post_shutdown(post_shutdown).build())
     app.add_error_handler(error_handler)
-    MSG=filters.UpdateType.MESSAGE   # solo mensajes nuevos (los editados se ignoran, salvo en el anti-spam)
+    MSG=filters.UpdateType.MESSAGE   # solo mensajes nuevos (los editados se ignoran, salvo en el anti-spam y el filtro)
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & (filters.TEXT | filters.CAPTION),filtro_handler),group=-3)
     app.add_handler(MessageHandler(filters.ChatType.GROUPS,antispam_handler),group=-2)
     app.add_handler(TypeHandler(Update,registrar_usuario),group=-1)
     for nombre,fn in [("start",start),("ayuda",ayuda_cmd),("clear",clear_cmd),("imagen",imagen_cmd),("buscar",buscar_cmd),
@@ -4541,7 +5286,12 @@ if __name__=="__main__":
                       ("antispam",antispam_cmd),("despedida",despedida_cmd),("panel",panel_cmd),
                       ("privacidad",privacidad_cmd),("borrardatos",borrardatos_cmd),
                       # --- sistema NEXUS ---
-                      ("sistema",sistema_cmd),("ping",ping_cmd),("radar",radar_cmd),("tema",tema_cmd),
+                      ("sistema",sistema_cmd),("ping",ping_cmd),("radar",radar_cmd),("tema",tema_cmd),("calc",calc_cmd),
+                      # --- moderación y actividad (V30) ---
+                      ("warn",warn_cmd),("unwarn",unwarn_cmd),("warns",warns_cmd),("warnlimite",warnlimite_cmd),
+                      ("mute",mute_cmd),("unmute",unmute_cmd),("ban",ban_cmd),("unban",unban_cmd),("kick",kick_cmd),
+                      ("filtro",filtro_cmd),("captcha",captcha_cmd),("actividad",actividad_cmd),
+                      ("rango",rango_cmd),("activos",activos_cmd),
                       # --- economía ---
                       ("economia",economia_cmd),("saldo",saldo_cmd),("diario",diario_cmd),("trabajar",trabajar_cmd),
                       ("minar",minar_cmd),("pescar",pescar_cmd),("cazar",cazar_cmd),("depositar",depositar_cmd),
@@ -4552,7 +5302,8 @@ if __name__=="__main__":
                       ("robar",robar_cmd),("duelo",duelo_cmd),("darmonedas",darmonedas_cmd),
                       ("quitarmonedas",quitarmonedas_cmd),("reiniciareco",reiniciareco_cmd),("lluvia",lluvia_cmd),
                       ("sorteo",sorteo_cmd),("ecochat",ecochat_cmd),("cripto",cripto_cmd),("igv",igv_cmd),
-                      ("interes",interes_cmd),("cuotas",cuotas_cmd),("propina",propina_cmd),("dividir",dividir_cmd)]:
+                      ("interes",interes_cmd),("cuotas",cuotas_cmd),("propina",propina_cmd),("dividir",dividir_cmd),
+                      ("negocios",negocios_cmd),("cobrar",cobrar_cmd),("misnegocios",misnegocios_cmd)]:
         app.add_handler(CommandHandler(nombre,_con_nexus(fn,nombre),filters=MSG))
     app.add_handler(CallbackQueryHandler(img_callback,pattern="^img:"))
     app.add_handler(CallbackQueryHandler(tt_callback,pattern="^tt:"))
@@ -4567,8 +5318,14 @@ if __name__=="__main__":
     app.add_handler(CallbackQueryHandler(sorteo_callback,pattern="^so:"))
     app.add_handler(CallbackQueryHandler(ayuda_callback,pattern="^ay:"))
     app.add_handler(CallbackQueryHandler(vozconfig_callback,pattern="^vz:"))
+    app.add_handler(CallbackQueryHandler(ia_callback,pattern="^ia:"))
+    app.add_handler(CallbackQueryHandler(captcha_callback,pattern="^cp:"))
+    app.add_handler(CallbackQueryHandler(negocios_callback,pattern="^ng:"))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS,bienvenida_handler))
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER,despedida_handler))
+    # captcha de suma: corre aparte, después del saludo
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS,captcha_handler),group=2)
+    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER,captcha_salida),group=2)
     # /s en el pie de una foto: debe ir ANTES de los handlers de foto y documento
     app.add_handler(MessageHandler(MSG & (filters.PHOTO | filters.Document.IMAGE) & filters.CaptionRegex(r"(?i)^/s(@\w+)?(\s|$)"),s_cmd))
     app.add_handler(MessageHandler(MSG & filters.VOICE,voz_handler))
@@ -4576,7 +5333,8 @@ if __name__=="__main__":
     app.add_handler(MessageHandler(MSG & filters.Document.ALL,documento_handler))
     app.add_handler(MessageHandler(MSG & filters.PHOTO,foto_handler))
     app.add_handler(MessageHandler(MSG & filters.TEXT & ~filters.COMMAND,ia_reply))
-    # monedas por chatear (corre aparte del chat con la IA)
+    # corren aparte del chat con la IA: monedas por chatear y XP de actividad del grupo
     app.add_handler(MessageHandler(MSG & filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,eco_chat_handler),group=1)
-    print("Bot V29 NEXUS iniciado 🔥")
+    app.add_handler(MessageHandler(MSG & filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,actividad_handler),group=3)
+    print("Bot V30 iniciado 🔥")
     app.run_polling()
